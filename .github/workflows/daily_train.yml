@@ -2,11 +2,11 @@ name: Daily Train & Signal
 
 on:
   schedule:
-    - cron: "0 22 * * 1-5"   # 22:00 UTC Mon–Fri (after US market close)
-  workflow_dispatch:           # allow manual trigger
+    - cron: "0 22 * * 1-5"
+  workflow_dispatch:
 
 permissions:
-  contents: write              # allow the bot to push commits back to the repo
+  contents: write
 
 jobs:
   train-and-infer:
@@ -27,8 +27,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install torch==2.2.2 scikit-learn==1.4.2 datasets==2.19.0 huggingface_hub==0.23.0
+          pip install "numpy<2"
+          pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu
+          pip install scikit-learn==1.4.2 datasets==2.19.0 huggingface_hub==0.23.0
+          pip install pandas==2.2.2 pyarrow==16.0.0 requests==2.31.0
 
       - name: Train model
         env:
