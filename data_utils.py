@@ -186,12 +186,13 @@ def build_dataloaders(
     feature_df = engineer_features(raw_df)
     label_df   = make_labels(feature_df)
 
-    # Drop last row (no label for final day)
-    feature_df = feature_df.iloc[:-PRED_HORIZON]
-    label_df   = label_df.iloc[:-PRED_HORIZON]
-
     feat_names = get_feature_names()
-    n_rows     = len(feature_df) - SEQ_LEN
+
+    # For training we need valid labels, so trim the last PRED_HORIZON rows
+    # But we keep full feature_df in meta so inference can use the latest date
+    feature_df_train = feature_df.iloc[:-PRED_HORIZON]
+    label_df_train   = label_df.iloc[:-PRED_HORIZON]
+    n_rows     = len(feature_df_train) - SEQ_LEN
 
     # Chronological splits
     n_train = int(n_rows * TRAIN_RATIO)
@@ -204,7 +205,7 @@ def build_dataloaders(
     # Fit normalisation stats on training data only
     train_data = np.concatenate(
         [
-            feature_df[ticker][feat_names].iloc[: n_train + SEQ_LEN].values
+            feature_df_train[ticker][feat_names].iloc[: n_train + SEQ_LEN].values
             for ticker in TARGET_ETFS
         ],
         axis=0,
@@ -213,7 +214,7 @@ def build_dataloaders(
     std  = train_data.std(axis=0)
 
     def make_ds(idx):
-        return ETFDataset(feature_df, label_df, idx, mean, std)
+        return ETFDataset(feature_df_train, label_df_train, idx, mean, std)
 
     train_loader = DataLoader(make_ds(train_idx), batch_size=batch_size, shuffle=True,  drop_last=True)
     val_loader   = DataLoader(make_ds(val_idx),   batch_size=batch_size, shuffle=False)
@@ -222,7 +223,7 @@ def build_dataloaders(
     meta = {
         "mean":       mean,
         "std":        std,
-        "feature_df": feature_df,
+        "feature_df": feature_df,          # full df including latest date for inference
         "label_df":   label_df,
         "test_idx":   test_idx,
         "dates":      feature_df.index,
