@@ -1,0 +1,44 @@
+name: Daily Train & Signal
+
+on:
+  schedule:
+    - cron: "0 22 * * 1-5"   # 22:00 UTC Mon–Fri (after US market close)
+  workflow_dispatch:           # allow manual trigger
+
+jobs:
+  train-and-infer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Train model
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python train.py --hf_token "$HF_TOKEN"
+
+      - name: Generate signal
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python infer.py --hf_token "$HF_TOKEN"
+
+      - name: Commit updated artifacts
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add latest.json train_metrics.json model.pt || true
+          git diff --cached --quiet || git commit -m "chore: daily signal update $(date -u +'%Y-%m-%d')"
+          git push
