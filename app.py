@@ -237,13 +237,13 @@ def main():
     st.divider()
     st.markdown(f"### Backtest Performance "
                 f"<span style='font-size:1rem;font-weight:400;color:#6b7280'>"
-                f"· {bt_label} · long-only, 0.1% trading cost each side</span>",
+                f"· {bt_label} · long-only, 0.05% trading cost each side</span>",
                 unsafe_allow_html=True)
     n_tr  = bts.get("num_trades", "—")
     n_dy  = bts.get("num_days", "—")
     t_rt  = bts.get("trade_rate", 0)
     hit   = bts.get("hit_rate", None)
-    st.caption(f"Strategy: picks ETF with highest P(up) each day; only trades if P(up) > 50%, "
+    st.caption(f"Strategy: picks ETF with highest P(up) each day; only trades if P(up) > 65%, "
                f"otherwise holds cash. **Traded {n_tr} of {n_dy} days ({t_rt:.0%})**.")
 
     c1,c2,c3,c4,c5,c6 = st.columns(6, gap="small")
