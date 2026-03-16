@@ -31,7 +31,7 @@ from hrformer import build_model
 DEVICE       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 EPOCHS       = 200
 PATIENCE     = 15
-LR           = 1e-3
+LR           = 5e-4
 BATCH_SIZE   = 32
 MODEL_PATH   = "model.pt"
 METRICS_PATH = "train_metrics.json"
@@ -126,7 +126,7 @@ def main():
 
     model     = build_model().to(DEVICE)
     criterion = nn.CrossEntropyLoss()
-    optimiser = Adam(model.parameters(), lr=LR, weight_decay=1e-4)
+    optimiser = Adam(model.parameters(), lr=LR, weight_decay=1e-3)
     scheduler = ReduceLROnPlateau(optimiser, mode="max", factor=0.5,
                                   patience=3, verbose=True)
 
