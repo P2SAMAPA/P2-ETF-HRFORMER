@@ -49,17 +49,18 @@ class SpectralDecomposition(nn.Module):
 
     def forward(self, x_w: torch.Tensor):
         # x_w: (B, L, d)
-        X_f  = torch.fft.rfft(x_w, dim=1)               # (B, L//2+1, d)
-        mag  = X_f.abs()
+        X_f  = torch.fft.rfft(x_w, dim=1)               # (B, F, d)  F = L//2+1
+        mag  = X_f.abs()                                 # (B, F, d)
+        F_   = mag.shape[1]
 
         # Local spectral threshold via 1-d avg pool over frequency axis
         mag_t = mag.permute(0, 2, 1)                     # (B, d, F)
-        k     = max(3, mag_t.shape[-1] // 4)
-        pad   = k // 2
-        local = F.avg_pool1d(
-            F.pad(mag_t, (pad, pad), mode="replicate"),
-            kernel_size=k, stride=1
-        ).permute(0, 2, 1)                               # (B, F, d)
+        k     = max(3, F_ // 4)
+        # padding=k//2 keeps output length == input length, trim to F_ to be safe
+        local = F.avg_pool1d(mag_t, kernel_size=k, stride=1,
+                             padding=k // 2)             # (B, d, F or F+1)
+        local = local[:, :, :F_]                         # (B, d, F)
+        local = local.permute(0, 2, 1)                   # (B, F, d)
 
         mask  = (mag > self.theta * local).float()       # (B, F, d)
         X_cyc = torch.fft.irfft(X_f * mask,       n=x_w.shape[1], dim=1)
@@ -198,7 +199,7 @@ class VolatilityEncoder(nn.Module):
             nn.Linear(d_model, d_model * 2), nn.ReLU(),
             nn.Linear(d_model * 2, d_model),
         )
-        self.lstm   = nn.LSTM(d_model, d_model, batch_first=True, dropout=dropout)
+        self.lstm   = nn.LSTM(d_model, d_model, batch_first=True)  # single layer, no dropout
         self.revin2 = RevIN(d_model)
         self.mlp2   = nn.Sequential(
             nn.Linear(d_model, d_model * 2), nn.ReLU(),
