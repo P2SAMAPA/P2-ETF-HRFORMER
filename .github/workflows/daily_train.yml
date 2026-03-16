@@ -28,11 +28,13 @@ jobs:
       - name: Train model
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PYTHONPATH: ${{ github.workspace }}
         run: python train.py --hf_token "$HF_TOKEN"
 
       - name: Generate signal
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PYTHONPATH: ${{ github.workspace }}
         run: python infer.py --hf_token "$HF_TOKEN"
 
       - name: Commit updated artifacts
