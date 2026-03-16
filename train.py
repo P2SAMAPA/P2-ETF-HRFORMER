@@ -29,8 +29,8 @@ from hrformer import build_model
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DEVICE       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-EPOCHS       = 40
-PATIENCE     = 7
+EPOCHS       = 200
+PATIENCE     = 15
 LR           = 1e-3
 BATCH_SIZE   = 32
 MODEL_PATH   = "model.pt"
