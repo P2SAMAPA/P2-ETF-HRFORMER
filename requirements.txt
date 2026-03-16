@@ -1,13 +1,6 @@
-# Streamlit app dependencies (app.py)
-streamlit==1.35.0
-plotly==5.22.0
-pandas==2.2.2
-numpy==1.26.4
-requests==2.31.0
-pyarrow==16.0.0
-
-# Training dependencies (train.py / infer.py) — installed by GitHub Actions only
-# torch
-# scikit-learn
-# datasets
-# huggingface_hub
+streamlit
+plotly
+pandas
+numpy
+requests
+pyarrow
