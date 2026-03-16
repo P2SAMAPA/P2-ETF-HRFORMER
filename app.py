@@ -214,16 +214,15 @@ def main():
     col_s, col_p = st.columns([1, 2], gap="large")
 
     with col_s:
-        warn = f'<div class="cash-warn">⚠ P(up) below 50% — hold cash tomorrow</div>' \
-               if not will_trade else ""
         st.markdown(f"""<div class="sig-card">
           <div class="sig-label">Tomorrow's Pick</div>
           <div class="sig-ticker">{rec}</div>
           <div class="sig-conf">P(up) = {conf:.1%}</div>
           <div class="sig-date">Based on data to: {sdate}</div>
           <div class="sig-date">Generated: {gen_at}</div>
-          {warn}
         </div>""", unsafe_allow_html=True)
+        if not will_trade:
+            st.warning("⚠️ P(up) below 50% — model suggests holding cash tomorrow")
 
     with col_p:
         st.markdown("### P(up) — All ETFs")
