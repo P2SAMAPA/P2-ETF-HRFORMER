@@ -252,12 +252,10 @@ def main():
     c1.markdown(mcard("Total Return",    bts.get("total_return"),      bt_label),        unsafe_allow_html=True)
     c2.markdown(mcard("Ann. Return",     bts.get("annualised_return"), "Annualised"),     unsafe_allow_html=True)
     sr = bts.get("sharpe_ratio")
+    sr_str = f"{sr:.2f}" if sr is not None else "—"
     sr_cls = "m-val-pos" if sr and sr > 0 else "m-val-neg"
-    c3.markdown(f'<div class="m-card"><div class="m-label">Sharpe Ratio</div><div class="{sr_cls}">{sr:.2f if sr else chr(8212)}</div>'
-                f'<div class="m-sub">Return ÷ risk (ann.)</div></div>',
+    c3.markdown(f'<div class="m-card"><div class="m-label">Sharpe Ratio</div><div class="{sr_cls}">{sr_str}</div><div class="m-sub">Return ÷ risk (ann.)</div></div>',
                 unsafe_allow_html=True)
-    c4.markdown(mcard("Max Drawdown",    bts.get("max_drawdown"),      "Worst peak-to-trough", good=False), unsafe_allow_html=True)
-    c5.markdown(mcard("Ann. Volatility", bts.get("annualised_vol"),    "Daily std × √252",     good=False), unsafe_allow_html=True)
     hr_str = f"{hit:.1%}" if hit is not None else "—"
     hr_cls = "m-val-pos" if hit and hit > 0.5 else "m-val-neg"
     c6.markdown(f'<div class="m-card"><div class="m-label">Pick Hit Rate</div>'
