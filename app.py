@@ -23,116 +23,92 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700&family=DM+Mono:wght@400;500&display=swap');
 
   html, body, [class*="css"] {
     font-family: 'DM Sans', sans-serif;
-    background-color: #f7f8fa;
-    color: #1a1d23;
+    background-color: #f4f6f9;
+    color: #111827;
+    font-size: 15px;
   }
   #MainMenu, footer, header { visibility: hidden; }
 
-  /* ── Hero: light theme ── */
+  /* Hero */
   .hero {
     background: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 16px;
-    padding: 28px 36px;
-    margin-bottom: 24px;
-  }
-  .hero-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 12px;
-  }
-  .hero h1 {
-    font-size: 1.7rem;
-    font-weight: 600;
-    letter-spacing: -0.5px;
-    margin: 0 0 4px 0;
-    color: #1a1d23;
-  }
-  .hero p { font-size: 0.88rem; color: #718096; margin: 0; }
-  .badge-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 14px; }
-  .badge {
-    display: inline-block;
-    background: #edf2f7;
-    border: 1px solid #e2e8f0;
-    border-radius: 20px;
-    padding: 3px 12px;
-    font-size: 0.78rem;
-    color: #4a5568;
-    font-family: 'DM Mono', monospace;
-    font-weight: 500;
-  }
-  .powered-by {
-    font-size: 0.75rem;
-    color: #a0aec0;
-    text-align: right;
-    line-height: 1.5;
-  }
-  .powered-by strong { color: #718096; }
-
-  /* ── Signal card ── */
-  .signal-card {
-    background: #ffffff;
+    border: 1px solid #d1d9e0;
     border-radius: 14px;
-    padding: 28px 32px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.07), 0 0 0 1px rgba(0,0,0,0.04);
-    margin-bottom: 20px;
+    padding: 26px 34px;
+    margin-bottom: 22px;
+  }
+  .hero h1 { font-size: 1.8rem; font-weight: 700; letter-spacing: -0.5px; margin: 0 0 4px 0; color: #111827; }
+  .hero p  { font-size: 0.95rem; color: #374151; margin: 0; font-weight: 500; }
+  .hero .badge {
+    display: inline-block; background: #f1f5f9; border: 1px solid #cbd5e1;
+    border-radius: 20px; padding: 4px 13px;
+    font-size: 0.8rem; font-weight: 600; color: #1e293b;
+    margin-right: 6px; margin-top: 10px;
+  }
+  .hero .badge.active { background: #dbeafe; color: #1e40af; border-color: #93c5fd; }
+
+  /* Signal card */
+  .signal-card {
+    background: #ffffff; border-radius: 14px; padding: 26px 30px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.05);
+    margin-bottom: 18px;
   }
   .signal-card .label {
-    font-size: 0.75rem; font-weight: 700; letter-spacing: 0.06em;
-    text-transform: uppercase; color: #718096; margin-bottom: 6px;
+    font-size: 0.75rem; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: #6b7280; margin-bottom: 8px;
   }
   .signal-card .ticker {
-    font-size: 3rem; font-weight: 600; color: #1a1d23;
-    letter-spacing: -1px; line-height: 1; font-family: 'DM Mono', monospace;
+    font-size: 3.4rem; font-weight: 700; color: #111827;
+    letter-spacing: -2px; line-height: 1; font-family: 'DM Mono', monospace;
   }
-  .signal-card .conf   { font-size: 1rem; color: #38a169; font-weight: 500; margin-top: 4px; }
-  .signal-card .date   { font-size: 0.8rem; color: #a0aec0; margin-top: 10px; font-family: 'DM Mono', monospace; }
+  .signal-card .conf { font-size: 1.1rem; color: #15803d; font-weight: 700; margin-top: 8px; }
+  .signal-card .date { font-size: 0.85rem; color: #374151; margin-top: 8px; font-family: 'DM Mono', monospace; font-weight: 500; }
 
-  /* ── Metric tiles ── */
+  /* Metric tiles */
   .metric-tile {
-    background: #ffffff; border-radius: 12px; padding: 20px 24px;
+    background: #ffffff; border-radius: 12px; padding: 18px 20px;
     box-shadow: 0 1px 3px rgba(0,0,0,0.07), 0 0 0 1px rgba(0,0,0,0.04);
-    margin-bottom: 16px;
+    margin-bottom: 12px;
   }
   .metric-tile .m-label {
-    font-size: 0.7rem; font-weight: 600; letter-spacing: 0.08em;
-    text-transform: uppercase; color: #a0aec0; margin-bottom: 4px;
+    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.07em;
+    text-transform: uppercase; color: #6b7280; margin-bottom: 6px;
   }
   .metric-tile .m-value {
-    font-size: 1.65rem; font-weight: 600; color: #1a1d23;
-    font-family: 'DM Mono', monospace; letter-spacing: -0.5px;
+    font-size: 1.9rem; font-weight: 700; color: #111827;
+    font-family: 'DM Mono', monospace; letter-spacing: -0.5px; line-height: 1.1;
   }
-  .metric-tile .m-sub { font-size: 0.76rem; color: #718096; margin-top: 2px; }
-  .pos { color: #38a169 !important; }
-  .neg { color: #e53e3e !important; }
+  .metric-tile .m-sub { font-size: 0.8rem; color: #374151; margin-top: 5px; font-weight: 500; }
+  .pos { color: #15803d !important; }
+  .neg { color: #b91c1c !important; }
 
-  /* ── Section headers ── */
+  /* Section headers */
   .section-title {
-    font-size: 1.1rem; font-weight: 700; color: #0d1117;
-    margin: 24px 0 12px 0; padding-bottom: 8px;
-    border-bottom: 2px solid #e2e8f0;
+    font-size: 1.1rem; font-weight: 700; color: #111827;
+    margin: 22px 0 10px 0; padding-bottom: 8px; border-bottom: 2px solid #e2e8f0;
   }
   .section-sub {
-    font-size: 0.82rem; color: #718096; margin: -8px 0 14px 0;
+    font-size: 0.9rem; color: #374151; font-weight: 400;
+    margin: -6px 0 14px 0; line-height: 1.6;
   }
 
-  /* ── Info box ── */
+  /* Info box */
   .info-box {
-    background: #f0f7ff; border: 1px solid #bee3f8; border-radius: 10px;
-    padding: 12px 16px; font-size: 0.88rem; color: #1a365d; margin-bottom: 16px;
-    line-height: 1.6;
+    background: #eff6ff; border: 1px solid #bfdbfe;
+    border-radius: 10px; padding: 16px 20px;
+    font-size: 0.9rem; color: #1e3a5f; margin-bottom: 16px; line-height: 1.7;
   }
+  .info-box strong { color: #1e3a8a; }
 
-  /* ── Disclaimer ── */
+  /* Disclaimer */
   .disclaimer {
-    background: #fffbeb; border: 1px solid #fbd38d; border-radius: 10px;
-    padding: 14px 18px; font-size: 0.79rem; color: #744210; margin-top: 32px;
+    background: #fffbeb; border: 1px solid #fbbf24;
+    border-radius: 10px; padding: 14px 18px;
+    font-size: 0.85rem; color: #78350f; margin-top: 28px; font-weight: 500;
   }
 </style>
 """, unsafe_allow_html=True)
