@@ -124,7 +124,7 @@ AXES        = dict(xaxis=dict(showgrid=True, gridcolor="#edf2f7", linecolor="#e2
 # ── Data loading ──────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600)
-def load_signal() -> dict | None:
+def load_signal():
     if os.path.exists("latest.json"):
         with open("latest.json") as f:
             d = json.load(f)
@@ -291,7 +291,7 @@ def main():
                     unsafe_allow_html=True)
         probs = sig.get("probabilities", {})
         if probs:
-            st.plotly_chart(prob_bar_chart(probs), use_container_width=True,
+            st.plotly_chart(prob_bar_chart(probs), width='stretch',
                             config={"displayModeBar": False})
 
     # ── Backtest ──────────────────────────────────────────────────────────────
@@ -329,7 +329,7 @@ def main():
                 unsafe_allow_html=True)
     if dates and equity:
         st.plotly_chart(equity_chart(dates, equity, picks),
-                        use_container_width=True, config={"displayModeBar": False})
+                        width='stretch', config={"displayModeBar": False})
 
     # ── Drawdown + Pick distribution ──────────────────────────────────────────
     col_dd, col_pie = st.columns([2, 1], gap="large")
@@ -338,7 +338,7 @@ def main():
         st.markdown('<div class="section-sub">How far the portfolio fell from its previous peak at each point in time.</div>',
                     unsafe_allow_html=True)
         if equity:
-            st.plotly_chart(drawdown_chart(dates, equity), use_container_width=True,
+            st.plotly_chart(drawdown_chart(dates, equity), width='stretch',
                             config={"displayModeBar": False})
     with col_pie:
         st.markdown(f'<div class="section-title">Pick Distribution</div>',
@@ -346,7 +346,7 @@ def main():
         st.markdown(f'<div class="section-sub">How often each ETF was selected during the backtest period ({bt_label}).</div>',
                     unsafe_allow_html=True)
         if picks:
-            st.plotly_chart(pick_distribution_chart(picks), use_container_width=True,
+            st.plotly_chart(pick_distribution_chart(picks), width='stretch',
                             config={"displayModeBar": False})
 
     # ── Model metrics ─────────────────────────────────────────────────────────
@@ -385,19 +385,7 @@ def main():
                 "Recall":    f"{agg.get('recall', 0):.1%}",
                 "F1":        f"{agg.get('f1', 0):.1%}",
             })
-        df_show = pd.DataFrame(rows)
-        st.dataframe(
-            df_show.style.set_properties(**{
-                'font-size': '15px',
-                'color': '#0d1117',
-                'font-weight': '500',
-            }).set_table_styles([{
-                'selector': 'th',
-                'props': [('font-size', '13px'), ('color', '#2d3748'),
-                          ('font-weight', '700'), ('text-transform', 'uppercase')]
-            }]),
-            use_container_width=True, hide_index=True
-        )
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
 
     # ── Disclaimer ────────────────────────────────────────────────────────────
     st.markdown("""
