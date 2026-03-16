@@ -71,7 +71,6 @@ ETF_NAMES = {
 PLOT = dict(
     font=dict(family="DM Sans, sans-serif", size=13, color="#111827"),
     paper_bgcolor="white", plot_bgcolor="white",
-    margin=dict(l=0, r=0, t=10, b=0),
 )
 GRID = dict(showgrid=True, gridcolor="#f1f5f9", linecolor="#e2e8f0", zeroline=False)
 
@@ -120,7 +119,7 @@ def chart_equity(dates, equity, picks):
     fig.add_trace(go.Scatter(x=df.d, y=df.e, mode="lines",
         line=dict(color="#1e293b", width=2.5), name="Portfolio"))
     fig.add_hline(y=1.0, line_dash="dot", line_color="#94a3b8", line_width=1)
-    fig.update_layout(**PLOT, height=320,
+    fig.update_layout(**PLOT, height=320, margin=dict(l=0,r=0,t=10,b=0),
         xaxis={**GRID}, yaxis={**GRID, "title": "Portfolio value (start = 1.0)"},
         hovermode="x unified",
         legend=dict(orientation="h", y=1.06, x=1, xanchor="right", yanchor="bottom"))
@@ -136,7 +135,7 @@ def chart_probs(probs):
         text=[f"{v:.1%}" for v in vals], textposition="outside",
         textfont=dict(size=14, color="#111827"),
     ))
-    fig.update_layout(**PLOT, height=280,
+    fig.update_layout(**PLOT, height=280, margin=dict(l=0,r=0,t=10,b=0),
         xaxis={**GRID, "tickfont": dict(size=14, color="#111827")},
         yaxis={**GRID, "range": [0, 1.05], "tickformat": ".0%",
                "tickfont": dict(size=13)},
@@ -152,7 +151,7 @@ def chart_drawdown(equity, dates):
         x=pd.to_datetime(dates), y=dd, mode="lines", fill="tozeroy",
         line=dict(color="#ef4444", width=1.5),
         fillcolor="rgba(239,68,68,0.1)"))
-    fig.update_layout(**PLOT, height=220,
+    fig.update_layout(**PLOT, height=220, margin=dict(l=0,r=0,t=10,b=0),
         xaxis={**GRID}, yaxis={**GRID, "tickformat": ".0%", "title": "Drawdown"},
         showlegend=False)
     return fig
@@ -166,8 +165,8 @@ def chart_picks(picks):
         hole=0.52, textinfo="label+percent",
         textfont=dict(size=13, color="#111827"),
     ))
-    fig.update_layout(**PLOT, height=280, showlegend=False,
-        margin=dict(l=10, r=10, t=10, b=10))
+    fig.update_layout(**PLOT, height=280, showlegend=False)
+    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
     return fig
 
 
