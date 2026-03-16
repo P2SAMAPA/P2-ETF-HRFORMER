@@ -31,7 +31,7 @@ from hrformer import build_model
 DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_PATH  = "model.pt"
 OUTPUT_PATH = "latest.json"
-UP_THRESHOLD = 0.60   # only trade when model is genuinely confident
+UP_THRESHOLD = 0.65   # high bar — only trade on strongest signals
 
 
 # ── Backtest ──────────────────────────────────────────────────────────────────
@@ -42,7 +42,7 @@ def run_backtest(
     test_idx:     np.ndarray,
     mean:         np.ndarray,
     std:          np.ndarray,
-    trading_cost: float = 0.001,
+    trading_cost: float = 0.0005,  # 0.05% each side — realistic for liquid ETFs
 ) -> dict:
     """
     For each day in test_idx:
@@ -227,7 +227,7 @@ def main():
     model.eval()
 
     print("Running backtest on test set...")
-    backtest = run_backtest(model, feature_df_train, test_idx, mean, std)
+    backtest = run_backtest(model, feature_df_train, test_idx, mean, std, trading_cost=0.0005)
     print(f"  Total return  : {backtest['summary']['total_return']:.1%}")
     print(f"  Sharpe ratio  : {backtest['summary']['sharpe_ratio']:.2f}")
     print(f"  Trades made   : {backtest['summary']['num_trades']} / {backtest['summary']['num_days']} days")
