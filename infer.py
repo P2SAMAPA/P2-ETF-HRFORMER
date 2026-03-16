@@ -11,6 +11,7 @@ Outputs latest.json (root) with:
 """
 
 import os
+import sys
 import json
 import argparse
 from datetime import datetime
@@ -18,6 +19,8 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import torch
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from data_utils import (
     build_dataloaders, load_raw_df, engineer_features,
