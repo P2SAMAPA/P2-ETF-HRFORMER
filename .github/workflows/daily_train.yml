@@ -11,7 +11,7 @@ permissions:
 jobs:
   train-and-infer:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repo
@@ -29,14 +29,14 @@ jobs:
         run: |
           pip install "numpy<2"
           pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu
-          pip install scikit-learn==1.4.2 datasets==2.19.0 huggingface_hub==0.23.0
+          pip install scikit-learn==1.4.2 huggingface_hub==0.23.0
           pip install pandas==2.2.2 pyarrow==16.0.0 requests==2.31.0
 
-      - name: Train model
+      - name: Walk-forward training (both modes)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PYTHONPATH: ${{ github.workspace }}
-        run: python train.py --hf_token "$HF_TOKEN"
+        run: python train.py --hf_token "$HF_TOKEN" --mode both
 
       - name: Generate signal
         env:
@@ -48,6 +48,6 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add latest.json train_metrics.json model.pt || true
-          git diff --cached --quiet || git commit -m "chore: daily signal update $(date -u +'%Y-%m-%d')"
+          git add latest.json walk_forward_results.json model_expanding.pt model_fixed.pt || true
+          git diff --cached --quiet || git commit -m "chore: daily walk-forward update $(date -u +'%Y-%m-%d')"
           git push
