@@ -11,6 +11,7 @@ Workflow:
 """
 
 import os
+import sys
 import json
 import time
 import argparse
@@ -20,6 +21,8 @@ import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from data_utils import build_dataloaders, TARGET_ETFS, SEQ_LEN
 from hrformer import build_model
