@@ -84,8 +84,8 @@ st.markdown("""
     margin-bottom: 20px;
   }
   .signal-card .label {
-    font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em;
-    text-transform: uppercase; color: #a0aec0; margin-bottom: 6px;
+    font-size: 0.75rem; font-weight: 700; letter-spacing: 0.06em;
+    text-transform: uppercase; color: #718096; margin-bottom: 6px;
   }
   .signal-card .ticker {
     font-size: 3rem; font-weight: 600; color: #1a1d23;
@@ -114,9 +114,9 @@ st.markdown("""
 
   /* ── Section headers ── */
   .section-title {
-    font-size: 1rem; font-weight: 600; color: #1a1d23;
+    font-size: 1.1rem; font-weight: 700; color: #0d1117;
     margin: 24px 0 12px 0; padding-bottom: 8px;
-    border-bottom: 2px solid #edf2f7;
+    border-bottom: 2px solid #e2e8f0;
   }
   .section-sub {
     font-size: 0.82rem; color: #718096; margin: -8px 0 14px 0;
@@ -125,7 +125,7 @@ st.markdown("""
   /* ── Info box ── */
   .info-box {
     background: #f0f7ff; border: 1px solid #bee3f8; border-radius: 10px;
-    padding: 12px 16px; font-size: 0.82rem; color: #2c5282; margin-bottom: 16px;
+    padding: 12px 16px; font-size: 0.88rem; color: #1a365d; margin-bottom: 16px;
     line-height: 1.6;
   }
 
@@ -409,7 +409,19 @@ def main():
                 "Recall":    f"{agg.get('recall', 0):.1%}",
                 "F1":        f"{agg.get('f1', 0):.1%}",
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        df_show = pd.DataFrame(rows)
+        st.dataframe(
+            df_show.style.set_properties(**{
+                'font-size': '15px',
+                'color': '#0d1117',
+                'font-weight': '500',
+            }).set_table_styles([{
+                'selector': 'th',
+                'props': [('font-size', '13px'), ('color', '#2d3748'),
+                          ('font-weight', '700'), ('text-transform', 'uppercase')]
+            }]),
+            use_container_width=True, hide_index=True
+        )
 
     # ── Disclaimer ────────────────────────────────────────────────────────────
     st.markdown("""
