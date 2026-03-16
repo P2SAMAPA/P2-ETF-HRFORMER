@@ -1,21 +1,4 @@
 {
-  "generated_at": "2026-03-16T16:26:09Z",
-  "best_mode": "fixed",
-  "signal": {
-    "signal_date": "2026-03-16",
-    "data_date": "2026-03-13",
-    "recommended_etf": "GLD",
-    "confidence": 0.9309,
-    "will_trade": true,
-    "probabilities": {
-      "TLT": 0.1484,
-      "VNQ": 0.6263,
-      "SLV": 0.7755,
-      "GLD": 0.9309,
-      "LQD": 0.1194,
-      "HYG": 0.1033
-    }
-  },
   "expanding": {
     "folds": [
       {
@@ -99429,5 +99412,6 @@
       }
     },
     "elapsed_s": 1773.8
-  }
+  },
+  "best_mode": "fixed"
 }
