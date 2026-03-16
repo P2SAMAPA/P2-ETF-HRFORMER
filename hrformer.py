@@ -369,6 +369,6 @@ def build_model(
         d_model=64,
         n_heads=4,
         n_layers=2,
-        dropout=0.1,
+        dropout=0.3,
         kernel_size=13,
     )
