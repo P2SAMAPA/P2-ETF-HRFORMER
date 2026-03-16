@@ -170,7 +170,7 @@ class ETFDataset(Dataset):
         # y: shape (num_etfs,)
         y = self.label_df[TARGET_ETFS].iloc[t + SEQ_LEN].values.astype(np.int64)
 
-        return torch.tensor(x), torch.tensor(y)
+        return torch.from_numpy(x), torch.from_numpy(y)
 
 
 # ── Main builder ──────────────────────────────────────────────────────────────
