@@ -33,10 +33,10 @@ from hrformer import build_model
 from torch.utils.data import DataLoader
 
 DEVICE       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-EPOCHS       = 200
-PATIENCE     = 15
+EPOCHS       = 80
+PATIENCE     = 10
 LR           = 5e-4
-BATCH_SIZE   = 32
+BATCH_SIZE   = 64
 FIXED_YEARS  = 2      # train window for fixed mode
 FOLD_YEARS   = 1      # test period per fold
 MIN_TRAIN_YEARS = 3   # expanding: minimum years before first fold
