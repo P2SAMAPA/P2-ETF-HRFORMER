@@ -41,6 +41,7 @@ def load_raw_df(hf_token: str | None = None) -> pd.DataFrame:
         filename=HF_DATA_FILE,
         repo_type="dataset",
         token=hf_token,
+        force_download=True,   # always fetch latest — no stale cache
     )
     df = pd.read_parquet(local_path)
 
