@@ -31,7 +31,7 @@ from hrformer import build_model
 DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_PATH  = "model.pt"
 OUTPUT_PATH = "latest.json"
-UP_THRESHOLD = 0.50   # minimum P(up) to enter a trade
+UP_THRESHOLD = 0.55   # minimum P(up) to enter a trade — raised to reduce false signals
 
 
 # ── Backtest ──────────────────────────────────────────────────────────────────
