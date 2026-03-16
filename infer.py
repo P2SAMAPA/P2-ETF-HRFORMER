@@ -59,6 +59,7 @@ def run_backtest(
     daily_returns = []
     picks         = []
     trade_flags   = []
+    correct_flags = []   # True/False/None per day
     all_proba     = []
 
     with torch.no_grad():
@@ -96,6 +97,10 @@ def run_backtest(
             close_next  = feature_df[pick_etf]["Close"].iloc[idx_next]
             raw_ret     = (close_next - close_today) / (close_today + 1e-8)
 
+            # Track whether the pick was actually correct (for hit rate)
+            actual_up = raw_ret > 0
+            pick_correct = bool(actual_up)  # model picked this ETF; was it right?
+
             # Only trade if model is confident enough
             if proba[pick_idx] > UP_THRESHOLD:
                 ret = raw_ret - 2 * trading_cost
@@ -103,13 +108,18 @@ def run_backtest(
             else:
                 ret = 0.0   # stay in cash
                 trade_flags.append(False)
+                pick_correct = None  # no trade, not counted
 
+            correct_flags.append(pick_correct)
             daily_returns.append(float(ret))
             equity.append(equity[-1] * (1 + ret))
 
     daily_returns = np.array(daily_returns)
     equity        = np.array(equity)
     n_trades      = sum(trade_flags)
+    traded_correct = [c for c in correct_flags if c is True]
+    traded_total   = [c for c in correct_flags if c is not None]
+    hit_rate       = len(traded_correct) / max(len(traded_total), 1)
 
     ann_return = float((equity[-1] ** (252 / max(len(daily_returns), 1))) - 1)
     ann_vol    = float(daily_returns.std() * np.sqrt(252))
@@ -142,6 +152,7 @@ def run_backtest(
             "num_days":          len(daily_returns),
             "num_trades":        n_trades,
             "trade_rate":        round(n_trades / max(len(daily_returns), 1), 4),
+            "hit_rate":          round(hit_rate, 4),
         },
     }
 
