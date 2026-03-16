@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
-from datasets import load_dataset
 
 # ── Constants ────────────────────────────────────────────────────────────────
 TARGET_ETFS   = ["TLT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
@@ -27,29 +26,37 @@ START_DATE    = "2008-01-01"
 
 def load_raw_df(hf_token: str | None = None) -> pd.DataFrame:
     """
-    Download parquet from HF, return a DataFrame with:
+    Download parquet directly via huggingface_hub (bypasses datasets schema
+    inference which conflicts when multiple parquet configs exist in the repo).
+    Returns a DataFrame with:
         index  : DatetimeIndex (daily)
         columns: MultiIndex (ticker, feature)
     Filtered to TARGET_ETFS and dates >= START_DATE.
     """
-    ds = load_dataset(
-        HF_REPO,
-        data_files=HF_DATA_FILE,
-        split="train",
+    from huggingface_hub import hf_hub_download
+    import ast
+
+    local_path = hf_hub_download(
+        repo_id=HF_REPO,
+        filename=HF_DATA_FILE,
+        repo_type="dataset",
         token=hf_token,
     )
-    df = ds.to_pandas()
+    df = pd.read_parquet(local_path)
 
-    # Ensure Date column is the index
+    # Ensure Date is the index
     if "Date" in df.columns:
         df["Date"] = pd.to_datetime(df["Date"])
-        df = df.set_index("Date").sort_index()
+        df = df.set_index("Date")
+    elif df.index.name == "Date":
+        df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
 
-    # Re-build MultiIndex columns if stored as flat strings like "('TLT','Close')"
+    # Rebuild MultiIndex columns from flat strings like "('TLT','Close')"
     if not isinstance(df.columns, pd.MultiIndex):
-        import ast
         df.columns = pd.MultiIndex.from_tuples(
-            [ast.literal_eval(c) if c.startswith("(") else (c, "") for c in df.columns]
+            [ast.literal_eval(c) if c.startswith("(") else (c, "")
+             for c in df.columns]
         )
 
     # Keep only target ETFs
