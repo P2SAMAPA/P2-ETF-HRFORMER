@@ -174,10 +174,9 @@ def prob_bar_chart(probabilities: dict):
         textposition="outside",
     ))
     fig.update_layout(
-        **CHART_LAYOUT, height=260,
-        yaxis=dict(range=[0, 1], tickformat=".0%", **CHART_LAYOUT["yaxis"]),
-        showlegend=False,
+        **CHART_LAYOUT, height=260, showlegend=False,
     )
+    fig.update_yaxes(range=[0, 1], tickformat=".0%")
     fig.add_hline(y=0.5, line_dash="dot", line_color="#cbd5e0", line_width=1)
     return fig
 
