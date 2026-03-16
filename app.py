@@ -107,7 +107,8 @@ CHART_LAYOUT = dict(
     font_family="DM Sans",
     paper_bgcolor="white",
     plot_bgcolor="white",
-    margin=dict(l=0, r=0, t=24, b=0),
+)
+CHART_AXES = dict(
     xaxis=dict(showgrid=True, gridcolor="#edf2f7", linecolor="#e2e8f0"),
     yaxis=dict(showgrid=True, gridcolor="#edf2f7", linecolor="#e2e8f0"),
 )
@@ -155,11 +156,10 @@ def equity_chart(dates, equity, picks):
         line=dict(color="#1a1d23", width=2), name="Portfolio",
     ))
     fig.add_hline(y=1.0, line_dash="dot", line_color="#cbd5e0", line_width=1)
-    fig.update_layout(
-        **CHART_LAYOUT, height=340,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        yaxis_title="Portfolio Value", hovermode="x unified",
-    )
+    fig.update_layout(**CHART_LAYOUT, **CHART_AXES, height=340, hovermode="x unified",
+                       yaxis_title="Portfolio Value", margin=dict(l=0,r=0,t=24,b=0))
+    fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                  xanchor="right", x=1))
     return fig
 
 
@@ -173,9 +173,7 @@ def prob_bar_chart(probabilities: dict):
         text=[f"{p:.1%}" for p in probs],
         textposition="outside",
     ))
-    fig.update_layout(
-        **CHART_LAYOUT, height=260, showlegend=False,
-    )
+    fig.update_layout(**CHART_LAYOUT, **CHART_AXES, height=260, showlegend=False, margin=dict(l=0,r=0,t=24,b=0))
     fig.update_yaxes(range=[0, 1], tickformat=".0%")
     fig.add_hline(y=0.5, line_dash="dot", line_color="#cbd5e0", line_width=1)
     return fig
@@ -189,10 +187,7 @@ def drawdown_chart(equity):
         line=dict(color="#fc8181", width=1.5),
         fillcolor="rgba(252,129,129,0.15)",
     ))
-    fig.update_layout(
-        **CHART_LAYOUT, height=200,
-        yaxis_tickformat=".0%", yaxis_title="Drawdown", showlegend=False,
-    )
+    fig.update_layout(**CHART_LAYOUT, **CHART_AXES, height=200, yaxis_tickformat=".0%", yaxis_title="Drawdown", showlegend=False, margin=dict(l=0,r=0,t=24,b=0))
     return fig
 
 
@@ -207,10 +202,9 @@ def training_history_chart(history: list):
         name="Val loss", line=dict(color="#9f7aea", width=1.5)))
     fig.add_trace(go.Scatter(x=df["epoch"], y=df["val_f1"],
         name="Val F1", line=dict(color="#48bb78", width=2)), secondary_y=True)
-    fig.update_layout(
-        **CHART_LAYOUT, height=260,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
+    fig.update_layout(**CHART_LAYOUT, **CHART_AXES, height=260, margin=dict(l=0,r=0,t=24,b=0))
+    fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                  xanchor="right", x=1))
     fig.update_yaxes(title_text="Loss", secondary_y=False)
     fig.update_yaxes(title_text="F1",   secondary_y=True, range=[0, 1])
     return fig
@@ -224,10 +218,8 @@ def pick_distribution_chart(picks: list):
         marker_colors=[ETF_COLORS[t] for t in counts.index],
         hole=0.55, textinfo="label+percent", textfont_size=12,
     ))
-    fig.update_layout(
-        **CHART_LAYOUT, height=260, showlegend=False,
-        margin=dict(l=10, r=10, t=10, b=10),
-    )
+    fig.update_layout(**CHART_LAYOUT, height=260, showlegend=False, margin=dict(l=10,r=10,t=10,b=10))
+    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
     return fig
 
 
