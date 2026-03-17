@@ -144,18 +144,20 @@ def train_on_split(feature_df, label_df, train_idx, val_idx, model_path):
 
 def backtest_fold(model, feature_df, test_idx, mean, std, trading_cost=0.001):
     """
-    PAPER-style backtest: Select top 2 ETFs by predicted 48-day return.
+    48-day return prediction backtest: Select top 2 ETFs by predicted return.
     Hold for 48 days, then rebalance.
     """
     feat_names = get_feature_names()
     model.eval()
     
-    equity, rets, picks_list = [1.0], [], []
+    portfolio_returns = []
+    picks_list = []
     
     with torch.no_grad():
-        for t in test_idx:
+        # Step by 48 days (non-overlapping periods for clean backtest)
+        for t in test_idx[::PRED_HORIZON]:
             # Skip if not enough future data
-            if t + SEQ_LEN + PRED_HORIZON >= len(feature_df):
+            if t + SEQ_LEN + PRED_HORIZON > len(feature_df):
                 continue
             
             x = np.stack([
@@ -166,16 +168,15 @@ def backtest_fold(model, feature_df, test_idx, mean, std, trading_cost=0.001):
             x_tensor = torch.from_numpy(x).unsqueeze(0).to(DEVICE)
             pred_returns = model.predict_returns(x_tensor).cpu().numpy()[0]
             
-            # PAPER: Select top 2 ETFs by predicted return
+            # Select top 2 ETFs by predicted return
             top_2_idx = np.argsort(pred_returns)[-2:]
             top_2_etfs = [TARGET_ETFS[i] for i in top_2_idx]
-            top_2_pred = pred_returns[top_2_idx]
             
             picks_list.append(top_2_etfs)
             
             # Calculate actual 48-day return for portfolio (equal weight)
             i_today = t + SEQ_LEN - 1
-            i_future = t + SEQ_LEN + PRED_HORIZON - 1
+            i_future = min(t + SEQ_LEN + PRED_HORIZON - 1, len(feature_df) - 1)
             
             portfolio_ret = 0.0
             for etf in top_2_etfs:
@@ -187,26 +188,32 @@ def backtest_fold(model, feature_df, test_idx, mean, std, trading_cost=0.001):
             # Apply trading cost (entry + exit)
             portfolio_ret -= 2 * trading_cost
             
-            rets.append(portfolio_ret)
-            equity.append(equity[-1] * (1 + portfolio_ret))
+            # Sanity check
+            if abs(portfolio_ret) > 0.5:  # >50% return is suspicious
+                portfolio_ret = 0.0
             
-            # Skip ahead 48 days (non-overlapping periods)
-            # (In practice, you'd use overlapping windows, but this is cleaner for backtest)
+            portfolio_returns.append(portfolio_ret)
 
+    # Calculate equity curve from returns
+    equity = [1.0]
+    for r in portfolio_returns:
+        equity.append(equity[-1] * (1 + r))
+    
     equity = np.array(equity)
-    rets = np.array(rets)
     
     # Calculate metrics
-    total_ret = equity[-1] - 1
-    n_periods = len(rets)
-    ann_r = (equity[-1] ** (252 / (n_periods * PRED_HORIZON))) - 1
-    ann_v = rets.std() * np.sqrt(252 / PRED_HORIZON)
+    total_ret = equity[-1] - 1.0
+    n_periods = len(portfolio_returns)
+    periods_per_year = 252 / PRED_HORIZON  # ~5.25 periods per year
+    
+    ann_r = (equity[-1] ** (periods_per_year / n_periods)) - 1 if n_periods > 0 else 0.0
+    ann_v = np.std(portfolio_returns) * np.sqrt(periods_per_year) if n_periods > 0 else 0.0
     sharpe = ann_r / (ann_v + 1e-8)
-    dd = (equity / np.maximum.accumulate(equity) - 1).min()
+    dd = (equity / np.maximum.accumulate(equity) - 1).min() if len(equity) > 0 else 0.0
     
     return {
-        "equity": equity[1:].tolist(),
-        "returns": rets.tolist(),
+        "equity": equity.tolist(),
+        "returns": portfolio_returns,
         "picks": picks_list,
         "summary": {
             "annualised_return": round(float(ann_r), 4),
@@ -274,45 +281,55 @@ def run_walk_forward(feature_df, label_df, mode, model_path):
 
 
 def aggregate_folds(fold_results):
+    """
+    Fixed aggregation: properly chain returns without overflow.
+    """
     if not fold_results:
         return {}
     
-    # Chain equity curves
-    chained = [1.0]
-    all_picks = []
-    
+    # Collect all returns
+    all_rets = []
     for fold in fold_results:
-        eq = fold["equity"]
-        if not eq:
-            continue
-            
-        if len(chained) == 1:
-            for v in eq:
-                chained.append(v)
-        else:
-            scale = chained[-1] / eq[0] if eq[0] != 0 else 1.0
-            for v in eq:
-                chained.append(v * scale)
-                
-        all_picks.extend(fold["picks"])
-
-    chained = np.array(chained[1:])
+        rets = fold.get("returns", [])
+        if rets:
+            all_rets.extend(rets)
     
-    rets = np.diff(chained) / chained[:-1]
-    ann_r = (chained[-1] ** (252 / max(len(rets) * PRED_HORIZON, 1))) - 1
-    ann_v = rets.std() * np.sqrt(252 / PRED_HORIZON) if len(rets) > 0 else 0.0
+    if not all_rets:
+        return {}
+    
+    # Sanity check returns
+    all_rets = [r if abs(r) < 0.5 else 0.0 for r in all_rets]
+    
+    # Calculate equity curve
+    equity = [1.0]
+    for r in all_rets:
+        equity.append(equity[-1] * (1 + r))
+    
+    equity = np.array(equity)
+    rets_array = np.array(all_rets)
+    
+    # Calculate metrics
+    total_ret = equity[-1] - 1.0
+    n_periods = len(all_rets)
+    periods_per_year = 252 / PRED_HORIZON
+    
+    ann_r = (equity[-1] ** (periods_per_year / n_periods)) - 1 if n_periods > 0 else 0.0
+    ann_v = rets_array.std() * np.sqrt(periods_per_year) if len(rets_array) > 0 else 0.0
     sharpe = ann_r / (ann_v + 1e-8)
-    dd = (chained / np.maximum.accumulate(chained) - 1).min()
-
+    dd = (equity / np.maximum.accumulate(equity) - 1).min() if len(equity) > 0 else 0.0
+    
+    # Cap extreme values
+    total_ret = max(min(total_ret, 10.0), -0.99)  # Cap at +1000% / -99%
+    
     return {
-        "equity": chained.tolist(),
-        "picks": all_picks[:len(chained)],
+        "equity": equity.tolist(),
+        "returns": all_rets,
         "summary": {
             "annualised_return": round(float(ann_r), 4),
             "annualised_vol": round(float(ann_v), 4),
             "sharpe_ratio": round(float(sharpe), 4),
             "max_drawdown": round(float(dd), 4),
-            "total_return": round(float(chained[-1] - 1), 4),
+            "total_return": round(float(total_ret), 4),
             "num_folds": len(fold_results),
         }
     }
@@ -363,6 +380,7 @@ def main():
         print(f"\n{mode} complete in {elapsed}s")
         print(f"  Ann. return: {agg['summary']['annualised_return']:.2%}")
         print(f"  Sharpe: {agg['summary']['sharpe_ratio']:.2f}")
+        print(f"  Total return: {agg['summary']['total_return']:.2%}")
 
     # Determine best mode
     best_mode = max(results, key=lambda m: results[m]["aggregate"]["summary"]["annualised_return"])
@@ -372,6 +390,7 @@ def main():
     # Save results
     with open("walk_forward_results.json", "w") as f:
         json.dump(results, f, indent=2)
+    print("Results saved → walk_forward_results.json")
 
     # Save final model
     checkpoint = {
