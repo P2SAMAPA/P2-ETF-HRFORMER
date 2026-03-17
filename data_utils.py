@@ -85,6 +85,8 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     frames = []
     for ticker in TARGET_ETFS:
+        if ticker not in df.columns.get_level_values(0):
+            continue
         t = df[ticker].copy()
         t["daily_return"] = t["Close"].pct_change()
         t["log_volume"]   = np.log1p(t["Volume"])
@@ -92,7 +94,17 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         frames.append(t)
 
     result = pd.concat(frames, axis=1, keys=TARGET_ETFS)
-    result = result.replace([np.inf, -np.inf], np.nan).dropna()
+    result = result.replace([np.inf, -np.inf], np.nan)
+    
+    # CRITICAL FIX: Forward fill then backward fill to handle NaNs, 
+    # then drop only rows that are still all NaN
+    result = result.ffill().bfill()
+    result = result.dropna(how="all")
+    
+    # Ensure we have enough data
+    if len(result) < SEQ_LEN + PRED_HORIZON + 10:
+        raise ValueError(f"Insufficient data after cleaning: {len(result)} rows")
+    
     return result
 
 
@@ -104,7 +116,10 @@ def get_feature_names() -> list[str]:
 # ── Normalisation ─────────────────────────────────────────────────────────────
 
 def normalise(arr: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
-    return (arr - mean) / (std + 1e-8)
+    # CRITICAL FIX: Ensure std is not zero or NaN
+    std = np.where(np.isnan(std), 1.0, std)
+    std = np.where(std == 0, 1.0, std)
+    return (arr - mean) / std
 
 
 # ── Labels ────────────────────────────────────────────────────────────────────
@@ -112,14 +127,27 @@ def normalise(arr: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
 def make_labels(df: pd.DataFrame) -> pd.DataFrame:
     """
     Binary label per ETF per day:
-        1  if close_{t+1} > close_t
-        0  otherwise
+        1  if close_{t+1} > close_t  (UP movement)
+        0  otherwise                (DOWN or FLAT)
     """
     labels = {}
     for ticker in TARGET_ETFS:
+        if ticker not in df.columns.get_level_values(0):
+            continue
         close = df[ticker]["Close"]
-        labels[ticker] = (close.shift(-PRED_HORIZON) > close).astype(int)
-    return pd.DataFrame(labels, index=df.index)
+        # CRITICAL FIX: Explicitly handle the comparison
+        # Label = 1 if next day close > today close
+        next_close = close.shift(-PRED_HORIZON)
+        labels[ticker] = (next_close > close).astype(int)
+    
+    label_df = pd.DataFrame(labels, index=df.index)
+    
+    # CRITICAL FIX: Verify label distribution
+    for ticker in labels.keys():
+        up_ratio = label_df[ticker].mean()
+        print(f"  Label distribution {ticker}: {up_ratio:.1%} up, {1-up_ratio:.1%} down")
+    
+    return label_df
 
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
@@ -146,29 +174,41 @@ class ETFDataset(Dataset):
         self.std        = std
         self.feat_names = get_feature_names()
         self.num_etfs   = len(TARGET_ETFS)
+        
+        # CRITICAL FIX: Validate indices
+        max_idx = len(feature_df) - SEQ_LEN - 1
+        valid_mask = (indices >= 0) & (indices <= max_idx)
+        if not valid_mask.all():
+            invalid = indices[~valid_mask]
+            raise ValueError(f"Invalid indices in ETFDataset: {invalid[:5]}... (max allowed: {max_idx})")
 
     def __len__(self):
         return len(self.indices)
 
     def __getitem__(self, idx):
         t = self.indices[idx]
+        
+        # CRITICAL FIX: Bounds checking
+        max_t = len(self.feature_df) - SEQ_LEN - 1
+        if t < 0 or t > max_t:
+            raise IndexError(f"Index {t} out of bounds [0, {max_t}]")
+        
         # x: shape (num_etfs, seq_len, num_features)
-        x = np.stack(
-            [
-                normalise(
-                    self.feature_df[ticker][self.feat_names]
-                    .iloc[t : t + SEQ_LEN]
-                    .values,
-                    self.mean,
-                    self.std,
-                )
-                for ticker in TARGET_ETFS
-            ],
-            axis=0,
-        ).astype(np.float32)
+        x_list = []
+        for ticker in TARGET_ETFS:
+            ticker_data = self.feature_df[ticker][self.feat_names].iloc[t : t + SEQ_LEN].values
+            if len(ticker_data) < SEQ_LEN:
+                raise ValueError(f"Insufficient data for {ticker} at index {t}: got {len(ticker_data)}, need {SEQ_LEN}")
+            x_list.append(normalise(ticker_data, self.mean, self.std))
+        
+        x = np.stack(x_list, axis=0).astype(np.float32)
 
-        # y: shape (num_etfs,)
-        y = self.label_df[TARGET_ETFS].iloc[t + SEQ_LEN].values.astype(np.int64)
+        # y: shape (num_etfs,) - label at the END of the sequence (t + SEQ_LEN)
+        label_idx = t + SEQ_LEN
+        if label_idx >= len(self.label_df):
+            raise IndexError(f"Label index {label_idx} out of bounds")
+        
+        y = self.label_df[TARGET_ETFS].iloc[label_idx].values.astype(np.int64)
 
         return torch.from_numpy(x), torch.from_numpy(y)
 
@@ -213,6 +253,9 @@ def build_dataloaders(
     )
     mean = train_data.mean(axis=0)
     std  = train_data.std(axis=0)
+    
+    # CRITICAL FIX: Handle zero std
+    std = np.where(std == 0, 1.0, std)
 
     def make_ds(idx):
         return ETFDataset(feature_df_train, label_df_train, idx, mean, std)
