@@ -12,8 +12,8 @@ TARGET_ETFS = ["TLT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
 FEATURES = ["Open", "High", "Low", "Close", "Volume"]
 HF_REPO = "P2SAMAPA/etf-dlinear-cross-data"
 HF_DATA_FILE = "fixed_income/ohlcv_fixed_income.parquet"
-SEQ_LEN = 48
-PRED_HORIZON = 1
+SEQ_LEN = 48          # Input: past 48 days
+PRED_HORIZON = 48     # PAPER: predict 48-day return
 START_DATE = "2008-01-01"
 
 
@@ -87,26 +87,31 @@ def normalise(arr, mean, std):
 
 
 def make_labels(df):
-    """Binary label: 1 if next-day close > today close."""
+    """
+    PAPER: 48-day forward return (regression target).
+    Returns: DataFrame with continuous returns, not binary labels.
+    """
     labels = {}
     for ticker in TARGET_ETFS:
         if ticker not in df.columns.get_level_values(0):
             continue
         close = df[ticker]["Close"]
-        labels[ticker] = (close.shift(-PRED_HORIZON) > close).astype(int)
+        # 48-day forward return: (close[t+48] - close[t]) / close[t]
+        future_return = (close.shift(-PRED_HORIZON) - close) / close
+        labels[ticker] = future_return
     
     label_df = pd.DataFrame(labels, index=df.index)
     
-    # Print distribution once
+    # Print distribution
     for ticker in labels.keys():
-        up_ratio = label_df[ticker].mean()
-        print(f"  {ticker}: {up_ratio:.1%} up, {1-up_ratio:.1%} down")
+        returns = label_df[ticker].dropna()
+        print(f"  {ticker}: mean={returns.mean():.4f}, std={returns.std():.4f}")
     
     return label_df
 
 
 class ETFDataset(Dataset):
-    """Dataset for ETF sequences."""
+    """Dataset for ETF sequences with 48-day return targets."""
     
     def __init__(self, feature_df, label_df, indices, mean, std):
         self.feature_df = feature_df
@@ -116,8 +121,8 @@ class ETFDataset(Dataset):
         self.std = std
         self.feat_names = get_feature_names()
         
-        # Validate
-        max_idx = len(feature_df) - SEQ_LEN - 1
+        # Validate indices
+        max_idx = len(feature_df) - SEQ_LEN - PRED_HORIZON
         self.indices = indices[(indices >= 0) & (indices <= max_idx)]
         
     def __len__(self):
@@ -132,6 +137,8 @@ class ETFDataset(Dataset):
             x_list.append(normalise(vals, self.mean, self.std))
         
         x = np.stack(x_list, axis=0).astype(np.float32)
-        y = self.label_df[TARGET_ETFS].iloc[t + SEQ_LEN].values.astype(np.int64)
+        
+        # PAPER: Predict 48-day return for each ETF
+        y = self.label_df[TARGET_ETFS].iloc[t + SEQ_LEN].values.astype(np.float32)
         
         return torch.from_numpy(x), torch.from_numpy(y)
