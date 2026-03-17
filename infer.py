@@ -18,16 +18,17 @@ from data_utils import (
 )
 from hrformer import build_model
 
-DEVICE       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-UP_THRESHOLD = 0.65
-OUTPUT_PATH  = "latest.json"
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+OUTPUT_PATH = "latest.json"
 
 
-def generate_signal(model, feature_df, mean, std):
+def generate_signal(model, feature_df, mean, std, temperature=1.0, threshold=0.55):
+    """
+    Generate trading signal with temperature scaling.
+    """
     feat_names = get_feature_names()
     t = len(feature_df) - SEQ_LEN
     
-    # CRITICAL FIX: Ensure we have enough data
     if t < 0:
         raise ValueError(f"Not enough data. Need {SEQ_LEN} rows, have {len(feature_df)}")
     
@@ -35,34 +36,50 @@ def generate_signal(model, feature_df, mean, std):
         feature_df[tk][feat_names].iloc[t:t+SEQ_LEN].values, mean, std)
         for tk in TARGET_ETFS], axis=0).astype(np.float32)
     
+    model.eval()
     with torch.no_grad():
-        proba = model.predict_proba(
-            torch.from_numpy(x).unsqueeze(0).to(DEVICE)).cpu().numpy()[0]
+        x_tensor = torch.from_numpy(x).unsqueeze(0).to(DEVICE)
+        logits = model(x_tensor)
+        
+        # Apply temperature scaling
+        logits = logits / temperature
+        proba = torch.softmax(logits, dim=-1).cpu().numpy()[0]
+        
+        # Debug: print all probabilities
+        print(f"  Raw logits: {logits.cpu().numpy()[0]}")
+        print(f"  Temperature: {temperature:.3f}")
+        print(f"  Probabilities (P-up):")
+        for i, ticker in enumerate(TARGET_ETFS):
+            print(f"    {ticker}: {proba[i, 1]:.4f} (down: {proba[i, 0]:.4f})")
 
     last_data_date = feature_df.index[t + SEQ_LEN - 1]
     from pandas.tseries.offsets import BDay
     next_trade_date = (last_data_date + BDay(1)).strftime("%Y-%m-%d")
 
-    pick_i = int(np.argmax(proba))
+    # Pick ETF with highest P(up)
+    pick_i = int(np.argmax(proba[:, 1]))
+    confidence = float(proba[pick_i, 1])
     
-    # CRITICAL FIX: Added detailed logging for debugging
-    print(f"  Probabilities: {dict(zip(TARGET_ETFS, [round(p, 4) for p in proba]))}")
-    print(f"  Selected: {TARGET_ETFS[pick_i]} with P(up)={proba[pick_i]:.4f}")
-    
+    print(f"  Selected: {TARGET_ETFS[pick_i]} with P(up)={confidence:.4f}")
+    print(f"  Threshold: {threshold} -> Will trade: {confidence > threshold}")
+
     return {
         "signal_date": next_trade_date,
         "data_date": last_data_date.strftime("%Y-%m-%d"),
         "recommended_etf": TARGET_ETFS[pick_i],
-        "confidence": round(float(proba[pick_i]), 4),
-        "will_trade": bool(proba[pick_i] > UP_THRESHOLD),
-        "probabilities": {t: round(float(p), 4)
-                         for t, p in zip(TARGET_ETFS, proba)},
+        "confidence": round(confidence, 4),
+        "will_trade": bool(confidence > threshold),
+        "probabilities": {ticker: round(float(proba[i, 1]), 4)
+                         for i, ticker in enumerate(TARGET_ETFS)},
+        "threshold": threshold,
+        "temperature": temperature,
     }
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN"))
+    parser.add_argument("--threshold", type=float, default=0.55, help="Confidence threshold")
     args = parser.parse_args()
 
     # Load walk-forward results
@@ -80,41 +97,42 @@ def main():
         print(f"{model_path} not found.")
         return
 
-    ann_return = wf.get(best_mode, {}).get('aggregate', {}).get('summary', {}).get('annualised_return', 0)
-    print(f"Best mode: {best_mode.upper()} (ann. return: {ann_return:.1%})")
+    # Load temperature from results
+    temperature = wf.get(best_mode, {}).get("temperature", 1.0)
+    ann_return = wf.get(best_mode, {}).get("aggregate", {}).get("summary", {}).get("annualised_return", 0)
+    
+    print(f"Best mode: {best_mode.upper()} (ann. return: {ann_return:.2%})")
+    print(f"Using temperature: {temperature:.3f}")
 
     print("Loading data...")
     raw_df = load_raw_df(args.hf_token)
     feature_df = engineer_features(raw_df)
-    
-    # CRITICAL FIX: Ensure feature_df is aligned with model expectations
-    # Remove last PRED_HORIZON rows to match training data preparation
     feature_df_trim = feature_df.iloc[:-PRED_HORIZON] if len(feature_df) > PRED_HORIZON else feature_df
 
     print("Loading model...")
+    
+    # Load checkpoint with temperature
+    checkpoint = torch.load(model_path, map_location=DEVICE)
     model = build_model().to(DEVICE)
-    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+    model.load_state_dict(checkpoint['model'])
     model.eval()
-
-    # Compute mean/std from last FIXED_YEARS*252 rows of the best mode's last fold
-    # CRITICAL FIX: Use consistent normalization with training
-    feat_names = get_feature_names()
     
-    # Use last 504 trading days (~2 years) for normalization stats
-    norm_window = min(504, len(feature_df_trim))
-    recent_data = np.concatenate(
-        [feature_df_trim[tk][feat_names].iloc[-norm_window:].values
-         for tk in TARGET_ETFS], axis=0)
-    mean = recent_data.mean(0)
-    std = recent_data.std(0)
+    mean = checkpoint['mean']
+    std = checkpoint['std']
+    saved_temp = checkpoint.get('temperature', 1.0)
     
-    # CRITICAL FIX: Prevent division by zero in normalization
+    # Use saved temperature if available
+    if saved_temp != 1.0:
+        temperature = saved_temp
+    
     std = np.where(std == 0, 1.0, std)
 
     print("Generating signal...")
-    signal = generate_signal(model, feature_df_trim, mean, std)
-    print(f"  Trade decision: {'EXECUTE' if signal['will_trade'] else 'NO TRADE'} "
-          f"(threshold: {UP_THRESHOLD})")
+    signal = generate_signal(model, feature_df_trim, mean, std, 
+                            temperature=temperature, threshold=args.threshold)
+    print(f"\n  Trade decision: {'EXECUTE' if signal['will_trade'] else 'NO TRADE'}")
+    print(f"  Confidence: {signal['confidence']:.2%}")
+    print(f"  Threshold: {args.threshold}")
 
     output = {
         "generated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -126,7 +144,7 @@ def main():
 
     with open(OUTPUT_PATH, "w") as f:
         json.dump(output, f, indent=2)
-    print(f"Signal saved → {OUTPUT_PATH}")
+    print(f"\nSignal saved → {OUTPUT_PATH}")
 
     if args.hf_token:
         try:
