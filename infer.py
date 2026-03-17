@@ -1,6 +1,7 @@
 """
 infer.py
-Generate next-day signal using best walk-forward model.
+Generate 48-day ahead signal using trained model.
+Selects top 2 ETFs by predicted return.
 """
 
 import os, sys, json, argparse
@@ -19,8 +20,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 OUTPUT_PATH = "latest.json"
 
 
-def generate_signal(model, feature_df, mean, std, threshold=0.50):
-    """Generate trading signal."""
+def generate_signal(model, feature_df, mean, std):
+    """Generate 48-day ahead signal."""
     feat_names = get_feature_names()
     t = len(feature_df) - SEQ_LEN
     
@@ -35,43 +36,42 @@ def generate_signal(model, feature_df, mean, std, threshold=0.50):
     model.eval()
     with torch.no_grad():
         x_tensor = torch.from_numpy(x).unsqueeze(0).to(DEVICE)
-        proba = model.predict_proba(x_tensor).cpu().numpy()[0]
+        pred_returns = model.predict_returns(x_tensor).cpu().numpy()[0]
         
-        print("  Probabilities (P-up):")
+        print("  Predicted 48-day returns:")
         for i, ticker in enumerate(TARGET_ETFS):
-            print(f"    {ticker}: {proba[i]:.4f}")
+            print(f"    {ticker}: {pred_returns[i]:.4f} ({pred_returns[i]*100:.2f}%)")
 
+    # Select top 2
+    top_2_idx = np.argsort(pred_returns)[-2:]
+    top_2_etfs = [TARGET_ETFS[i] for i in top_2_idx]
+    
     last_data_date = feature_df.index[t + SEQ_LEN - 1]
     from pandas.tseries.offsets import BDay
     next_trade_date = (last_data_date + BDay(1)).strftime("%Y-%m-%d")
+    hold_until = (last_data_date + BDay(PRED_HORIZON)).strftime("%Y-%m-%d")
 
-    pick_i = int(np.argmax(proba))
-    confidence = float(proba[pick_i])
-    
-    print(f"  Selected: {TARGET_ETFS[pick_i]} (P-up={confidence:.4f})")
-    print(f"  Will trade: {confidence > threshold} (threshold={threshold})")
+    print(f"\n  Selected: {', '.join(top_2_etfs)}")
+    print(f"  Hold period: {next_trade_date} → {hold_until}")
 
     return {
         "signal_date": next_trade_date,
+        "hold_until": hold_until,
         "data_date": last_data_date.strftime("%Y-%m-%d"),
-        "recommended_etf": TARGET_ETFS[pick_i],
-        "confidence": round(confidence, 4),
-        "will_trade": bool(confidence > threshold),
-        "probabilities": {ticker: round(float(proba[i]), 4) 
-                         for i, ticker in enumerate(TARGET_ETFS)},
-        "threshold": threshold,
+        "recommended_etfs": top_2_etfs,
+        "predicted_returns": {ticker: round(float(pred_returns[i]), 4) 
+                             for i, ticker in enumerate(TARGET_ETFS)},
+        "strategy": "buy_hold_48d",
     }
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN"))
-    parser.add_argument("--threshold", type=float, default=0.50)
     args = parser.parse_args()
 
-    # Load results
     if not os.path.exists("walk_forward_results.json"):
-        print("walk_forward_results.json not found — run train.py first.")
+        print("Results not found — run train.py first.")
         return
 
     with open("walk_forward_results.json") as f:
@@ -90,7 +90,12 @@ def main():
     print("Loading data...")
     raw_df = load_raw_df(args.hf_token)
     feature_df = engineer_features(raw_df)
-    feature_df_trim = feature_df.iloc[:-PRED_HORIZON]
+    
+    # Use all available data (don't trim for inference)
+    # But ensure we have enough for lookback
+    if len(feature_df) < SEQ_LEN + 10:
+        print("Insufficient data")
+        return
 
     print("Loading model...")
     checkpoint = torch.load(model_path, map_location=DEVICE)
@@ -102,14 +107,13 @@ def main():
     std = np.where(std == 0, 1.0, std)
 
     print("Generating signal...")
-    signal = generate_signal(model, feature_df_trim, mean, std, threshold=args.threshold)
+    signal = generate_signal(model, feature_df, mean, std)
 
     output = {
         "generated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "best_mode": best_mode,
         "signal": signal,
-        "expanding": wf.get("expanding", {}),
-        "fixed": wf.get("fixed", {}),
+        "performance": wf.get(best_mode, {}).get("aggregate", {}).get("summary", {}),
     }
 
     with open(OUTPUT_PATH, "w") as f:
