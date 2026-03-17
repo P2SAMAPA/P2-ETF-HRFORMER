@@ -21,8 +21,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from sklearn.metrics import accuracy_score, f1_score
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, log_loss
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data_utils import (
@@ -33,37 +33,68 @@ from hrformer import build_model
 from torch.utils.data import DataLoader
 
 DEVICE       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-EPOCHS       = 80
-PATIENCE     = 10
-LR           = 5e-4
-BATCH_SIZE   = 64
+EPOCHS       = 100  # Increased for better convergence
+PATIENCE     = 15   # Increased patience
+LR           = 1e-3  # Higher initial LR
+BATCH_SIZE   = 32    # Smaller batch for better generalization
 FIXED_YEARS  = 2      # train window for fixed mode
 FOLD_YEARS   = 1      # test period per fold
 MIN_TRAIN_YEARS = 3   # expanding: minimum years before first fold
 
 
-def run_epoch(model, loader, criterion, optimiser=None):
+class TemperatureScaler(nn.Module):
+    """Temperature scaling for probability calibration."""
+    def __init__(self):
+        super().__init__()
+        self.temperature = nn.Parameter(torch.ones(1) * 1.5)  # Start with higher temp
+    
+    def forward(self, logits):
+        return logits / self.temperature
+
+
+def run_epoch(model, loader, criterion, optimiser=None, temperature_scaler=None):
     training = optimiser is not None
     model.train() if training else model.eval()
-    total_loss, preds_all, labels_all = 0.0, [], []
+    if temperature_scaler is not None:
+        temperature_scaler.train() if training else temperature_scaler.eval()
+    
+    total_loss, preds_all, labels_all, probs_all = 0.0, [], [], []
     ctx = torch.enable_grad() if training else torch.no_grad()
+    
     with ctx:
         for x, y in loader:
             x, y = x.to(DEVICE), y.to(DEVICE)
             logits = model(x)
+            
+            # Apply temperature scaling during inference
+            if temperature_scaler is not None and not training:
+                logits = temperature_scaler(logits)
+            
             B, M, _ = logits.shape
             loss = criterion(logits.view(B*M, 2), y.view(B*M))
+            
             if training:
                 optimiser.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimiser.step()
+            
             total_loss += loss.item() * B
+            probs = torch.softmax(logits, dim=-1)
             preds_all.extend(logits.argmax(-1).cpu().numpy().flatten())
             labels_all.extend(y.cpu().numpy().flatten())
-    f1  = f1_score(labels_all, preds_all, average="macro", zero_division=0)
+            probs_all.extend(probs[:, :, 1].cpu().numpy().flatten())  # P(up)
+    
+    f1 = f1_score(labels_all, preds_all, average="macro", zero_division=0)
     acc = accuracy_score(labels_all, preds_all)
-    return total_loss / (len(loader.dataset) + 1e-8), acc, f1
+    
+    # Calculate calibration metrics
+    try:
+        auc = roc_auc_score(labels_all, probs_all)
+    except:
+        auc = 0.5
+    
+    return total_loss / (len(loader.dataset) + 1e-8), acc, f1, auc
 
 
 def train_on_split(feature_df, label_df, train_idx, val_idx, model_path):
@@ -72,92 +103,177 @@ def train_on_split(feature_df, label_df, train_idx, val_idx, model_path):
         [feature_df[t][feat_names].iloc[train_idx[0]: train_idx[-1]+SEQ_LEN+1].values
          for t in TARGET_ETFS], axis=0)
     mean = train_data.mean(0)
-    std  = train_data.std(0)
+    std = train_data.std(0)
+    std = np.where(std == 0, 1.0, std)  # Prevent div by zero
 
     def make_loader(idx, shuffle):
         ds = ETFDataset(feature_df, label_df, idx, mean, std)
         return DataLoader(ds, batch_size=BATCH_SIZE, shuffle=shuffle, drop_last=shuffle)
 
     train_loader = make_loader(train_idx, True)
-    val_loader   = make_loader(val_idx,   False)
+    val_loader = make_loader(val_idx, False)
 
-    model     = build_model().to(DEVICE)
-    criterion = nn.CrossEntropyLoss()
-    optimiser = Adam(model.parameters(), lr=LR, weight_decay=1e-3)
-    scheduler = ReduceLROnPlateau(optimiser, mode="max", factor=0.5, patience=5)
+    model = build_model().to(DEVICE)
+    
+    # CRITICAL: Calculate class weights for imbalance
+    all_labels = []
+    for _, y in train_loader:
+        all_labels.extend(y.cpu().numpy().flatten())
+    class_counts = np.bincount(all_labels)
+    class_weights = torch.tensor([1.0 / class_counts[0], 1.0 / class_counts[1]], 
+                                  dtype=torch.float32).to(DEVICE)
+    class_weights = class_weights / class_weights.sum() * 2  # Normalize
+    
+    print(f"    Class weights: {class_weights.cpu().numpy()}")
+    
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    optimiser = Adam(model.parameters(), lr=LR, weight_decay=1e-4)
+    
+    # Use Cosine Annealing with Warm Restarts for better convergence
+    scheduler = CosineAnnealingWarmRestarts(optimiser, T_0=10, T_mult=2)
 
     best_f1, patience_ctr = -1, 0
+    best_state = None
+    
     for epoch in range(1, EPOCHS+1):
-        _, _, tr_f1 = run_epoch(model, train_loader, criterion, optimiser)
-        _, _, va_f1 = run_epoch(model, val_loader,   criterion)
-        scheduler.step(va_f1)
+        tr_loss, tr_acc, tr_f1, tr_auc = run_epoch(model, train_loader, criterion, optimiser)
+        va_loss, va_acc, va_f1, va_auc = run_epoch(model, val_loader, criterion)
+        
+        scheduler.step()
+        
         if va_f1 > best_f1:
             best_f1 = va_f1
-            torch.save(model.state_dict(), model_path)
+            best_state = {
+                'model': model.state_dict(),
+                'mean': mean,
+                'std': std,
+                'val_f1': va_f1,
+                'val_acc': va_acc,
+                'val_auc': va_auc
+            }
+            torch.save(best_state, model_path)
             patience_ctr = 0
         else:
             patience_ctr += 1
             if patience_ctr >= PATIENCE:
+                print(f"      Early stopping at epoch {epoch}")
                 break
-        if epoch % 5 == 0:
-            print(f"      ep{epoch:03d} tr_f1={tr_f1:.3f} va_f1={va_f1:.3f} best={best_f1:.3f}")
+        
+        if epoch % 10 == 0:
+            print(f"      ep{epoch:03d} tr_f1={tr_f1:.3f} va_f1={va_f1:.3f} "
+                  f"va_auc={va_auc:.3f} best={best_f1:.3f}")
 
-    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-    return model, mean, std, best_f1
+    # Load best model
+    checkpoint = torch.load(model_path, map_location=DEVICE)
+    model.load_state_dict(checkpoint['model'])
+    
+    print(f"    Best val - F1: {checkpoint['val_f1']:.3f}, "
+          f"Acc: {checkpoint['val_acc']:.3f}, AUC: {checkpoint['val_auc']:.3f}")
+    
+    return model, checkpoint['mean'], checkpoint['std'], best_f1
 
 
-def backtest_fold(model, feature_df, test_idx, mean, std, trading_cost=0.0005, threshold=0.65):
+def calibrate_temperature(model, val_loader, mean, std):
+    """Find optimal temperature for probability calibration."""
+    temperature_scaler = TemperatureScaler().to(DEVICE)
+    optimiser = Adam(temperature_scaler.parameters(), lr=0.01)
+    
+    # Collect validation logits and labels
+    all_logits, all_labels = [], []
+    model.eval()
+    with torch.no_grad():
+        for x, y in val_loader:
+            x, y = x.to(DEVICE), y.to(DEVICE)
+            logits = model(x)
+            all_logits.append(logits.view(-1, 2).cpu())
+            all_labels.append(y.view(-1).cpu())
+    
+    all_logits = torch.cat(all_logits).to(DEVICE)
+    all_labels = torch.cat(all_labels).to(DEVICE)
+    
+    # Optimize temperature to minimize NLL
+    criterion = nn.CrossEntropyLoss()
+    best_loss = float('inf')
+    best_temp = 1.0
+    
+    for _ in range(100):
+        optimiser.zero_grad()
+        scaled_logits = all_logits / temperature_scaler.temperature
+        loss = criterion(scaled_logits, all_labels)
+        loss.backward()
+        optimiser.step()
+        
+        if loss.item() < best_loss:
+            best_loss = loss.item()
+            best_temp = temperature_scaler.temperature.item()
+    
+    print(f"    Optimal temperature: {best_temp:.3f}")
+    return best_temp
+
+
+def backtest_fold(model, feature_df, test_idx, mean, std, trading_cost=0.0005, 
+                  threshold=0.55, temperature=1.0):  # Lowered threshold to 0.55
     """
-    CRITICAL FIX: Corrected return calculation and equity chaining.
-    The model predicts probability of UP movement.
-    We go LONG when P(up) > threshold, else stay in cash (0 return).
+    Backtest with temperature scaling and lower threshold.
     """
     feat_names = get_feature_names()
     model.eval()
     equity, rets, picks, probas = [1.0], [], [], []
+    
+    # Track confidence distribution
+    all_confidences = []
     
     with torch.no_grad():
         for t in test_idx:
             x = np.stack([normalise(
                 feature_df[tk][feat_names].iloc[t:t+SEQ_LEN].values, mean, std)
                 for tk in TARGET_ETFS], axis=0).astype(np.float32)
-            proba = model.predict_proba(
-                torch.from_numpy(x).unsqueeze(0).to(DEVICE)).cpu().numpy()[0]
+            
+            x_tensor = torch.from_numpy(x).unsqueeze(0).to(DEVICE)
+            logits = model(x_tensor)
+            
+            # Apply temperature scaling
+            logits = logits / temperature
+            proba = torch.softmax(logits, dim=-1).cpu().numpy()[0]
+            
             probas.append(proba.tolist())
-            pick_i = int(np.argmax(proba))
-            pick   = TARGET_ETFS[pick_i]
+            pick_i = int(np.argmax(proba[:, 1]))  # Pick ETF with highest P(up)
+            pick = TARGET_ETFS[pick_i]
             picks.append(pick)
 
             i_today = t + SEQ_LEN - 1
-            i_next  = t + SEQ_LEN
+            i_next = t + SEQ_LEN
             if i_next >= len(feature_df):
                 rets.append(0.0)
                 equity.append(equity[-1])
                 continue
 
-            # Get today's and tomorrow's prices for the selected ETF
             price_today = feature_df[pick]["Close"].iloc[i_today]
             price_next = feature_df[pick]["Close"].iloc[i_next]
-            
-            # Calculate raw return
             raw_ret = (price_next - price_today) / (price_today + 1e-8)
             
-            # CRITICAL FIX: Only trade if confidence exceeds threshold
-            # If we trade, we pay cost on entry AND exit (hence 2*trading_cost)
-            if proba[pick_i] > threshold:
-                # We are LONG - we gain raw_ret but pay trading costs
+            confidence = proba[pick_i, 1]
+            all_confidences.append(confidence)
+            
+            # Trade if confidence exceeds threshold
+            if confidence > threshold:
                 ret = raw_ret - 2 * trading_cost
             else:
-                # No trade - stay in cash, zero return
                 ret = 0.0
                 
             rets.append(float(ret))
             equity.append(equity[-1] * (1 + ret))
 
+    # Print confidence statistics
+    if all_confidences:
+        conf_array = np.array(all_confidences)
+        print(f"    Confidence stats: mean={conf_array.mean():.3f}, "
+              f"std={conf_array.std():.3f}, max={conf_array.max():.3f}, "
+              f"trades={(conf_array > threshold).sum()}/{len(conf_array)}")
+    
     rets = np.array(rets)
     equity = np.array(equity)
     
-    # Calculate metrics
     total_ret = equity[-1] - 1.0
     ann_r = float((equity[-1] ** (252 / max(len(rets), 1))) - 1)
     ann_v = float(rets.std() * np.sqrt(252))
@@ -189,13 +305,13 @@ def run_walk_forward(feature_df, label_df, mode, model_path):
     Returns list of fold results + the final trained model + mean/std.
     """
     trading_days_per_year = 252
-    fold_days  = FOLD_YEARS  * trading_days_per_year
+    fold_days = FOLD_YEARS * trading_days_per_year
     fixed_days = FIXED_YEARS * trading_days_per_year
-    min_days   = MIN_TRAIN_YEARS * trading_days_per_year
+    min_days = MIN_TRAIN_YEARS * trading_days_per_year
 
     n = len(feature_df) - SEQ_LEN - PRED_HORIZON
 
-    # Build fold cutoffs: first cutoff at min_train_years, then every fold_days
+    # Build fold cutoffs
     cutoffs = []
     c = min_days
     while c + fold_days <= n:
@@ -204,9 +320,10 @@ def run_walk_forward(feature_df, label_df, mode, model_path):
 
     print(f"  Mode: {mode} | Folds: {len(cutoffs)}")
     fold_results = []
-    final_model  = None
-    final_mean   = None
-    final_std    = None
+    final_model = None
+    final_mean = None
+    final_std = None
+    final_temperature = 1.0
 
     for fi, cutoff in enumerate(cutoffs):
         test_end = min(cutoff + fold_days, n)
@@ -220,8 +337,8 @@ def run_walk_forward(feature_df, label_df, mode, model_path):
         val_start = train_start + int(train_len * 0.8)
 
         train_idx = np.arange(train_start, val_start)
-        val_idx   = np.arange(val_start,   cutoff)
-        test_idx  = np.arange(cutoff,      test_end)
+        val_idx = np.arange(val_start, cutoff)
+        test_idx = np.arange(cutoff, test_end)
 
         if len(train_idx) < 50 or len(val_idx) < 10 or len(test_idx) < 10:
             continue
@@ -235,23 +352,34 @@ def run_walk_forward(feature_df, label_df, mode, model_path):
         model, mean, std, best_val_f1 = train_on_split(
             feature_df, label_df, train_idx, val_idx, model_path)
 
-        bt = backtest_fold(model, feature_df, test_idx, mean, std)
-        bt["fold"]       = fi + 1
+        # Calibrate temperature on validation set
+        val_loader = DataLoader(
+            ETFDataset(feature_df, label_df, val_idx, mean, std),
+            batch_size=BATCH_SIZE, shuffle=False
+        )
+        optimal_temp = calibrate_temperature(model, val_loader, mean, std)
+        
+        # Backtest with calibrated temperature
+        bt = backtest_fold(model, feature_df, test_idx, mean, std, 
+                          temperature=optimal_temp, threshold=0.55)  # Lower threshold
+        bt["fold"] = fi + 1
         bt["train_range"] = fold_label
-        bt["test_range"]  = test_label
+        bt["test_range"] = test_label
         bt["best_val_f1"] = round(best_val_f1, 4)
+        bt["temperature"] = round(optimal_temp, 3)
         fold_results.append(bt)
 
-        print(f"    → ann_return={bt['summary']['annualised_return']:.1%} "
+        print(f"    → ann_return={bt['summary']['annualised_return']:.2%} "
               f"sharpe={bt['summary']['sharpe_ratio']:.2f} "
-              f"val_f1={best_val_f1:.3f}")
+              f"val_f1={best_val_f1:.3f} temp={optimal_temp:.2f}")
 
         # Keep track of the most recent model for live signals
         final_model = model
-        final_mean  = mean
-        final_std   = std
+        final_mean = mean
+        final_std = std
+        final_temperature = optimal_temp
 
-    return fold_results, final_model, final_mean, final_std
+    return fold_results, final_model, final_mean, final_std, final_temperature
 
 
 def aggregate_folds(fold_results):
@@ -259,7 +387,7 @@ def aggregate_folds(fold_results):
     if not fold_results:
         return {}
     
-    # CRITICAL FIX: Properly chain equity curves from multiple folds
+    # Properly chain equity curves from multiple folds
     chained = [1.0]
     all_dates = []
     all_picks = []
@@ -271,11 +399,9 @@ def aggregate_folds(fold_results):
             
         # Scale fold equity to start where previous fold ended
         if len(chained) == 1:
-            # First fold - use as-is (starts at 1.0)
             for v in eq:
                 chained.append(v)
         else:
-            # Subsequent folds - scale to start at previous ending value
             scale_factor = chained[-1] / eq[0] if eq[0] != 0 else 1.0
             for v in eq:
                 chained.append(v * scale_factor)
@@ -283,10 +409,7 @@ def aggregate_folds(fold_results):
         all_dates.extend(fold["dates"])
         all_picks.extend(fold["picks"])
 
-    # Remove initial 1.0 seed value
     chained = np.array(chained[1:])
-    
-    # Ensure lengths match
     n = min(len(chained), len(all_dates))
     chained = chained[:n]
     all_dates = all_dates[:n]
@@ -294,7 +417,7 @@ def aggregate_folds(fold_results):
 
     # Calculate returns from equity curve
     rets = np.diff(np.concatenate([[1.0], chained])) / np.maximum(np.concatenate([[1.0], chained[:-1]]), 1e-8)
-    rets = rets[1:]  # Remove first artificial return
+    rets = rets[1:]
     
     ann_r = float((chained[-1] ** (252 / max(len(rets), 1))) - 1) if len(rets) > 0 else 0.0
     ann_v = float(rets.std() * np.sqrt(252)) if len(rets) > 0 else 0.0
@@ -326,11 +449,11 @@ def main():
     print(f"Device: {DEVICE} | Mode: {args.mode}")
     print("Loading data...")
     from data_utils import load_raw_df, engineer_features, make_labels
-    raw_df     = load_raw_df(args.hf_token)
+    raw_df = load_raw_df(args.hf_token)
     feature_df = engineer_features(raw_df)
-    label_df   = make_labels(feature_df)
+    label_df = make_labels(feature_df)
     feature_df = feature_df.iloc[:-PRED_HORIZON]
-    label_df   = label_df.iloc[:-PRED_HORIZON]
+    label_df = label_df.iloc[:-PRED_HORIZON]
     print(f"  Data: {feature_df.index[0].date()} → {feature_df.index[-1].date()} "
           f"({len(feature_df)} rows)")
 
@@ -343,19 +466,21 @@ def main():
         print(f"Running {mode.upper()} walk-forward...")
         t0 = time.time()
         model_path = f"model_{mode}.pt"
-        fold_results, final_model, mean, std = run_walk_forward(
+        fold_results, final_model, mean, std, temperature = run_walk_forward(
             feature_df, label_df, mode, model_path)
         elapsed = round(time.time() - t0, 1)
         agg = aggregate_folds(fold_results)
         results[mode] = {
-            "folds":     fold_results,
+            "folds": fold_results,
             "aggregate": agg,
             "elapsed_s": elapsed,
+            "temperature": temperature,
         }
         print(f"\n{mode} complete in {elapsed}s")
-        print(f"  Aggregate ann_return : {agg['summary']['annualised_return']:.1%}")
+        print(f"  Aggregate ann_return : {agg['summary']['annualised_return']:.2%}")
         print(f"  Aggregate sharpe     : {agg['summary']['sharpe_ratio']:.2f}")
-        print(f"  Aggregate total_ret  : {agg['summary']['total_return']:.1%}")
+        print(f"  Aggregate total_ret  : {agg['summary']['total_return']:.2%}")
+        print(f"  Final temperature    : {temperature:.3f}")
 
     # Determine best mode by annualised return
     if len(results) == 2:
@@ -366,19 +491,32 @@ def main():
 
     results["best_mode"] = best_mode
 
-    # Save combined results
+    # Save combined results with temperature
     with open("walk_forward_results.json", "w") as f:
         json.dump(results, f, indent=2)
     print("Results saved → walk_forward_results.json")
+
+    # Save final model with metadata
+    final_checkpoint = {
+        'model': final_model.state_dict(),
+        'mean': final_mean,
+        'std': final_std,
+        'temperature': temperature,
+        'mode': best_mode,
+    }
+    torch.save(final_checkpoint, f"model_{best_mode}.pt")
+    print(f"Saved final model with temperature={temperature:.3f}")
 
     # Push to HF Hub
     if args.hf_token:
         try:
             from huggingface_hub import HfApi
-            api  = HfApi(token=args.hf_token)
+            api = HfApi(token=args.hf_token)
             repo = "P2SAMAPA/etf-hrformer-model"
-            try: api.create_repo(repo, repo_type="model", exist_ok=True)
-            except: pass
+            try: 
+                api.create_repo(repo, repo_type="model", exist_ok=True)
+            except: 
+                pass
             for mode in modes_to_run:
                 api.upload_file(path_or_fileobj=f"model_{mode}.pt",
                                 path_in_repo=f"model_{mode}.pt",
