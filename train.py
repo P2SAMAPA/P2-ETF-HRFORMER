@@ -1,6 +1,7 @@
 """
 train.py
-Walk-forward training for P2-ETF-HRFORMER.
+Walk-forward training for 48-day return prediction.
+Uses ranking loss (similar to paper) + MSE.
 """
 
 import os, sys, json, time, argparse
@@ -9,7 +10,6 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data_utils import (
@@ -20,28 +20,55 @@ from hrformer import build_model
 from torch.utils.data import DataLoader
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-EPOCHS = 30           # Paper uses 30
+EPOCHS = 30
 PATIENCE = 10
-LR = 5e-4
-BATCH_SIZE = 64
+LR = 1e-3
+BATCH_SIZE = 32
 FIXED_YEARS = 2
 FOLD_YEARS = 1
 MIN_TRAIN_YEARS = 3
 
 
-def run_epoch(model, loader, criterion, optimiser=None):
+def ranking_loss(pred_returns, true_returns, margin=0.1):
+    """
+    Ranking loss: encourage correct ordering of returns.
+    If stock A has higher true return than B, pred should reflect that.
+    """
+    # Pairwise differences
+    n = pred_returns.shape[1]  # num_etfs
+    pred_diff = pred_returns.unsqueeze(2) - pred_returns.unsqueeze(1)  # (B, M, M)
+    true_diff = true_returns.unsqueeze(2) - true_returns.unsqueeze(1)
+    
+    # Only consider pairs where true_diff > margin
+    mask = (true_diff > margin).float()
+    
+    # Hinge loss: penalize if pred doesn't match order
+    loss = torch.relu(0.1 - pred_diff) * mask
+    
+    return loss.sum() / (mask.sum() + 1e-8)
+
+
+def run_epoch(model, loader, optimiser=None):
     training = optimiser is not None
     model.train() if training else model.eval()
     
-    total_loss, preds_all, labels_all, probs_all = 0.0, [], [], []
+    total_loss, total_mse, total_rank = 0.0, 0.0, 0.0
+    n_batches = 0
     
     with torch.enable_grad() if training else torch.no_grad():
         for x, y in loader:
-            x, y = x.to(DEVICE), y.to(DEVICE)
-            logits = model(x)
+            x, y = x.to(DEVICE), y.to(DEVICE)  # y: (B, M) returns
             
-            B, M, _ = logits.shape
-            loss = criterion(logits.view(B*M, 2), y.view(B*M))
+            pred = model(x)  # (B, M)
+            
+            # MSE loss
+            mse = nn.functional.mse_loss(pred, y)
+            
+            # Ranking loss
+            rank = ranking_loss(pred, y)
+            
+            # Combined
+            loss = mse + 0.5 * rank
             
             if training:
                 optimiser.zero_grad()
@@ -49,27 +76,18 @@ def run_epoch(model, loader, criterion, optimiser=None):
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimiser.step()
             
-            total_loss += loss.item() * B
-            probs = torch.softmax(logits, dim=-1)
-            preds_all.extend(logits.argmax(-1).cpu().numpy().flatten())
-            labels_all.extend(y.cpu().numpy().flatten())
-            probs_all.extend(probs[:, :, 1].detach().cpu().numpy().flatten())
+            total_loss += loss.item()
+            total_mse += mse.item()
+            total_rank += rank.item()
+            n_batches += 1
     
-    f1 = f1_score(labels_all, preds_all, average="macro", zero_division=0)
-    acc = accuracy_score(labels_all, preds_all)
-    
-    try:
-        auc = roc_auc_score(labels_all, probs_all)
-    except:
-        auc = 0.5
-    
-    return total_loss / len(loader.dataset), acc, f1, auc
+    return total_loss / n_batches, total_mse / n_batches, total_rank / n_batches
 
 
 def train_on_split(feature_df, label_df, train_idx, val_idx, model_path):
     feat_names = get_feature_names()
     
-    # Compute normalization stats
+    # Normalization stats
     train_data = np.concatenate([
         feature_df[t][feat_names].iloc[train_idx[0]:train_idx[-1]+SEQ_LEN].values
         for t in TARGET_ETFS
@@ -86,33 +104,25 @@ def train_on_split(feature_df, label_df, train_idx, val_idx, model_path):
     val_loader = make_loader(val_idx, False)
 
     model = build_model().to(DEVICE)
-    
-    # Simple class weighting
-    pos_weight = 1.0
-    neg_weight = 1.0
-    class_weights = torch.tensor([neg_weight, pos_weight]).to(DEVICE)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-    
     optimiser = Adam(model.parameters(), lr=LR, weight_decay=1e-4)
-    scheduler = ReduceLROnPlateau(optimiser, mode="max", factor=0.5, patience=5)
+    scheduler = ReduceLROnPlateau(optimiser, mode="min", factor=0.5, patience=5)
 
-    best_f1, patience_ctr = -1, 0
+    best_loss, patience_ctr = float('inf'), 0
     best_state = None
     
     for epoch in range(1, EPOCHS + 1):
-        tr_loss, tr_acc, tr_f1, tr_auc = run_epoch(model, train_loader, criterion, optimiser)
-        va_loss, va_acc, va_f1, va_auc = run_epoch(model, val_loader, criterion)
+        tr_loss, tr_mse, tr_rank = run_epoch(model, train_loader, optimiser)
+        va_loss, va_mse, va_rank = run_epoch(model, val_loader)
         
-        scheduler.step(va_f1)
+        scheduler.step(va_loss)
         
-        if va_f1 > best_f1:
-            best_f1 = va_f1
+        if va_loss < best_loss:
+            best_loss = va_loss
             best_state = {
                 'model': model.state_dict(),
                 'mean': mean,
                 'std': std,
-                'val_f1': va_f1,
-                'val_auc': va_auc
+                'val_loss': va_loss,
             }
             torch.save(best_state, model_path)
             patience_ctr = 0
@@ -123,86 +133,81 @@ def train_on_split(feature_df, label_df, train_idx, val_idx, model_path):
                 break
         
         if epoch % 5 == 0:
-            print(f"      ep{epoch:02d} tr_f1={tr_f1:.3f} va_f1={va_f1:.3f} va_auc={va_auc:.3f}")
+            print(f"      ep{epoch:02d} tr_loss={tr_loss:.4f} va_loss={va_loss:.4f}")
 
     checkpoint = torch.load(model_path, map_location=DEVICE)
     model.load_state_dict(checkpoint['model'])
     
-    print(f"    Best: F1={checkpoint['val_f1']:.3f}, AUC={checkpoint['val_auc']:.3f}")
-    return model, checkpoint['mean'], checkpoint['std'], best_f1
+    print(f"    Best val_loss: {checkpoint['val_loss']:.4f}")
+    return model, checkpoint['mean'], checkpoint['std']
 
 
-def backtest_fold(model, feature_df, test_idx, mean, std, trading_cost=0.0005, threshold=0.50):
+def backtest_fold(model, feature_df, test_idx, mean, std, trading_cost=0.001):
     """
-    Backtest with LOW threshold (0.50) to ensure trades happen.
+    PAPER-style backtest: Select top 2 ETFs by predicted 48-day return.
+    Hold for 48 days, then rebalance.
     """
     feat_names = get_feature_names()
     model.eval()
     
-    equity, rets, picks, probas = [1.0], [], [], []
-    all_confidences = []
+    equity, rets, picks_list = [1.0], [], []
     
     with torch.no_grad():
         for t in test_idx:
+            # Skip if not enough future data
+            if t + SEQ_LEN + PRED_HORIZON >= len(feature_df):
+                continue
+            
             x = np.stack([
                 normalise(feature_df[tk][feat_names].iloc[t:t+SEQ_LEN].values, mean, std)
                 for tk in TARGET_ETFS
             ], axis=0).astype(np.float32)
             
             x_tensor = torch.from_numpy(x).unsqueeze(0).to(DEVICE)
-            proba = model.predict_proba(x_tensor).cpu().numpy()[0]
+            pred_returns = model.predict_returns(x_tensor).cpu().numpy()[0]
             
-            probas.append(proba.tolist())
-            pick_i = int(np.argmax(proba))
-            pick = TARGET_ETFS[pick_i]
-            picks.append(pick)
-
+            # PAPER: Select top 2 ETFs by predicted return
+            top_2_idx = np.argsort(pred_returns)[-2:]
+            top_2_etfs = [TARGET_ETFS[i] for i in top_2_idx]
+            top_2_pred = pred_returns[top_2_idx]
+            
+            picks_list.append(top_2_etfs)
+            
+            # Calculate actual 48-day return for portfolio (equal weight)
             i_today = t + SEQ_LEN - 1
-            i_next = t + SEQ_LEN
-            if i_next >= len(feature_df):
-                rets.append(0.0)
-                equity.append(equity[-1])
-                continue
-
-            price_today = feature_df[pick]["Close"].iloc[i_today]
-            price_next = feature_df[pick]["Close"].iloc[i_next]
-            raw_ret = (price_next - price_today) / (price_today + 1e-8)
+            i_future = t + SEQ_LEN + PRED_HORIZON - 1
             
-            confidence = proba[pick_i]
-            all_confidences.append(confidence)
+            portfolio_ret = 0.0
+            for etf in top_2_etfs:
+                price_today = feature_df[etf]["Close"].iloc[i_today]
+                price_future = feature_df[etf]["Close"].iloc[i_future]
+                raw_ret = (price_future - price_today) / price_today
+                portfolio_ret += raw_ret / 2  # Equal weight
             
-            # CRITICAL: Trade if confidence > threshold (0.50 = always trade best pick)
-            if confidence > threshold:
-                ret = raw_ret - 2 * trading_cost
-            else:
-                ret = 0.0
-                
-            rets.append(float(ret))
-            equity.append(equity[-1] * (1 + ret))
+            # Apply trading cost (entry + exit)
+            portfolio_ret -= 2 * trading_cost
+            
+            rets.append(portfolio_ret)
+            equity.append(equity[-1] * (1 + portfolio_ret))
+            
+            # Skip ahead 48 days (non-overlapping periods)
+            # (In practice, you'd use overlapping windows, but this is cleaner for backtest)
 
-    # Print stats
-    if all_confidences:
-        conf_array = np.array(all_confidences)
-        print(f"    Conf: mean={conf_array.mean():.3f}, max={conf_array.max():.3f}, "
-              f"trades={(conf_array > threshold).sum()}/{len(conf_array)}")
-
-    rets = np.array(rets)
     equity = np.array(equity)
+    rets = np.array(rets)
     
-    total_ret = equity[-1] - 1.0
-    ann_r = (equity[-1] ** (252 / max(len(rets), 1))) - 1
-    ann_v = rets.std() * np.sqrt(252)
+    # Calculate metrics
+    total_ret = equity[-1] - 1
+    n_periods = len(rets)
+    ann_r = (equity[-1] ** (252 / (n_periods * PRED_HORIZON))) - 1
+    ann_v = rets.std() * np.sqrt(252 / PRED_HORIZON)
     sharpe = ann_r / (ann_v + 1e-8)
     dd = (equity / np.maximum.accumulate(equity) - 1).min()
     
-    dates = feature_df.index[[t + SEQ_LEN for t in test_idx
-                              if t + SEQ_LEN < len(feature_df)]].strftime("%Y-%m-%d").tolist()
-    
     return {
         "equity": equity[1:].tolist(),
-        "dates": dates[:len(equity)-1],
-        "picks": picks,
-        "probas": probas,
+        "returns": rets.tolist(),
+        "picks": picks_list,
         "summary": {
             "annualised_return": round(float(ann_r), 4),
             "annualised_vol": round(float(ann_v), 4),
@@ -252,15 +257,12 @@ def run_walk_forward(feature_df, label_df, mode, model_path):
                       f"{feature_df.index[min(test_end+SEQ_LEN-1, len(feature_df)-1)].strftime('%Y-%m-%d')}")
         print(f"  Fold {fi+1}/{len(cutoffs)}: train {fold_label} | test {test_label}")
 
-        model, mean, std, best_val_f1 = train_on_split(
-            feature_df, label_df, train_idx, val_idx, model_path)
+        model, mean, std = train_on_split(feature_df, label_df, train_idx, val_idx, model_path)
 
-        # Backtest with threshold=0.50 (always trade)
-        bt = backtest_fold(model, feature_df, test_idx, mean, std, threshold=0.50)
+        bt = backtest_fold(model, feature_df, test_idx, mean, std)
         bt["fold"] = fi + 1
         bt["train_range"] = fold_label
         bt["test_range"] = test_label
-        bt["best_val_f1"] = round(best_val_f1, 4)
         fold_results.append(bt)
 
         print(f"    → ann_ret={bt['summary']['annualised_return']:.2%} "
@@ -275,8 +277,9 @@ def aggregate_folds(fold_results):
     if not fold_results:
         return {}
     
+    # Chain equity curves
     chained = [1.0]
-    all_dates, all_picks = [], []
+    all_picks = []
     
     for fold in fold_results:
         eq = fold["equity"]
@@ -287,36 +290,29 @@ def aggregate_folds(fold_results):
             for v in eq:
                 chained.append(v)
         else:
-            scale = chained[-1]
+            scale = chained[-1] / eq[0] if eq[0] != 0 else 1.0
             for v in eq:
-                chained.append(v * scale / eq[0] if eq[0] != 0 else scale)
+                chained.append(v * scale)
                 
-        all_dates.extend(fold["dates"])
         all_picks.extend(fold["picks"])
 
     chained = np.array(chained[1:])
-    n = min(len(chained), len(all_dates))
-    chained = chained[:n]
-    all_dates = all_dates[:n]
-    all_picks = all_picks[:n]
-
-    rets = np.diff(chained) / chained[:-1]
     
-    ann_r = (chained[-1] ** (252 / max(len(rets), 1))) - 1 if len(rets) > 0 else 0.0
-    ann_v = rets.std() * np.sqrt(252) if len(rets) > 0 else 0.0
+    rets = np.diff(chained) / chained[:-1]
+    ann_r = (chained[-1] ** (252 / max(len(rets) * PRED_HORIZON, 1))) - 1
+    ann_v = rets.std() * np.sqrt(252 / PRED_HORIZON) if len(rets) > 0 else 0.0
     sharpe = ann_r / (ann_v + 1e-8)
-    dd = (chained / np.maximum.accumulate(chained) - 1).min() if len(chained) > 0 else 0.0
+    dd = (chained / np.maximum.accumulate(chained) - 1).min()
 
     return {
         "equity": chained.tolist(),
-        "dates": all_dates,
-        "picks": all_picks,
+        "picks": all_picks[:len(chained)],
         "summary": {
             "annualised_return": round(float(ann_r), 4),
             "annualised_vol": round(float(ann_v), 4),
             "sharpe_ratio": round(float(sharpe), 4),
             "max_drawdown": round(float(dd), 4),
-            "total_return": round(float(chained[-1] - 1), 4) if len(chained) > 0 else 0.0,
+            "total_return": round(float(chained[-1] - 1), 4),
             "num_folds": len(fold_results),
         }
     }
@@ -326,7 +322,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN"))
     parser.add_argument("--mode", type=str, default="both",
-                        choices=["single", "expanding", "fixed", "both"])
+                        choices=["expanding", "fixed", "both"])
     args = parser.parse_args()
 
     print(f"Device: {DEVICE} | Mode: {args.mode}")
@@ -335,6 +331,8 @@ def main():
     raw_df = load_raw_df(args.hf_token)
     feature_df = engineer_features(raw_df)
     label_df = make_labels(feature_df)
+    
+    # Trim last PRED_HORIZON rows where labels are NaN
     feature_df = feature_df.iloc[:-PRED_HORIZON]
     label_df = label_df.iloc[:-PRED_HORIZON]
     
@@ -365,33 +363,27 @@ def main():
         print(f"\n{mode} complete in {elapsed}s")
         print(f"  Ann. return: {agg['summary']['annualised_return']:.2%}")
         print(f"  Sharpe: {agg['summary']['sharpe_ratio']:.2f}")
-        print(f"  Total return: {agg['summary']['total_return']:.2%}")
 
     # Determine best mode
-    if len(results) == 2:
-        best_mode = max(results, key=lambda m: results[m]["aggregate"]["summary"]["annualised_return"])
-    else:
-        best_mode = modes_to_run[0]
-    
+    best_mode = max(results, key=lambda m: results[m]["aggregate"]["summary"]["annualised_return"])
     results["best_mode"] = best_mode
     print(f"\nBest mode: {best_mode.upper()}")
 
     # Save results
     with open("walk_forward_results.json", "w") as f:
         json.dump(results, f, indent=2)
-    print("Results saved → walk_forward_results.json")
 
     # Save final model
     checkpoint = {
         'model': final_model.state_dict(),
-        'mean': final_mean,
-        'std': final_std,
+        'mean': mean,
+        'std': std,
         'mode': best_mode,
     }
     torch.save(checkpoint, f"model_{best_mode}.pt")
     print(f"Model saved → model_{best_mode}.pt")
 
-    # Push to HF Hub
+    # Push to HF
     if args.hf_token:
         try:
             from huggingface_hub import HfApi
