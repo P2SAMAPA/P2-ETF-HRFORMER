@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from sklearn.metrics import accuracy_score, f1_score
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data_utils import (
@@ -107,9 +107,15 @@ def train_on_split(feature_df, label_df, train_idx, val_idx, model_path):
 
 
 def backtest_fold(model, feature_df, test_idx, mean, std, trading_cost=0.0005, threshold=0.65):
+    """
+    CRITICAL FIX: Corrected return calculation and equity chaining.
+    The model predicts probability of UP movement.
+    We go LONG when P(up) > threshold, else stay in cash (0 return).
+    """
     feat_names = get_feature_names()
     model.eval()
     equity, rets, picks, probas = [1.0], [], [], []
+    
     with torch.no_grad():
         for t in test_idx:
             x = np.stack([normalise(
@@ -125,35 +131,54 @@ def backtest_fold(model, feature_df, test_idx, mean, std, trading_cost=0.0005, t
             i_today = t + SEQ_LEN - 1
             i_next  = t + SEQ_LEN
             if i_next >= len(feature_df):
-                rets.append(0.0); equity.append(equity[-1]); continue
+                rets.append(0.0)
+                equity.append(equity[-1])
+                continue
 
-            raw_ret = ((feature_df[pick]["Close"].iloc[i_next] -
-                        feature_df[pick]["Close"].iloc[i_today]) /
-                       (feature_df[pick]["Close"].iloc[i_today] + 1e-8))
-            ret = (raw_ret - 2*trading_cost) if proba[pick_i] > threshold else 0.0
+            # Get today's and tomorrow's prices for the selected ETF
+            price_today = feature_df[pick]["Close"].iloc[i_today]
+            price_next = feature_df[pick]["Close"].iloc[i_next]
+            
+            # Calculate raw return
+            raw_ret = (price_next - price_today) / (price_today + 1e-8)
+            
+            # CRITICAL FIX: Only trade if confidence exceeds threshold
+            # If we trade, we pay cost on entry AND exit (hence 2*trading_cost)
+            if proba[pick_i] > threshold:
+                # We are LONG - we gain raw_ret but pay trading costs
+                ret = raw_ret - 2 * trading_cost
+            else:
+                # No trade - stay in cash, zero return
+                ret = 0.0
+                
             rets.append(float(ret))
-            equity.append(equity[-1] * (1+ret))
+            equity.append(equity[-1] * (1 + ret))
 
-    rets   = np.array(rets)
+    rets = np.array(rets)
     equity = np.array(equity)
-    ann_r  = float((equity[-1] ** (252/max(len(rets),1))) - 1)
-    ann_v  = float(rets.std() * np.sqrt(252))
+    
+    # Calculate metrics
+    total_ret = equity[-1] - 1.0
+    ann_r = float((equity[-1] ** (252 / max(len(rets), 1))) - 1)
+    ann_v = float(rets.std() * np.sqrt(252))
     sharpe = float(ann_r / (ann_v + 1e-8))
-    dd     = float((equity / np.maximum.accumulate(equity) - 1).min())
-    dates  = feature_df.index[[t+SEQ_LEN for t in test_idx
-                                if t+SEQ_LEN < len(feature_df)]].strftime("%Y-%m-%d").tolist()
+    dd = float((equity / np.maximum.accumulate(equity) - 1).min())
+    
+    dates = feature_df.index[[t + SEQ_LEN for t in test_idx
+                              if t + SEQ_LEN < len(feature_df)]].strftime("%Y-%m-%d").tolist()
     n = len(dates)
+    
     return {
-        "equity":   equity[1:n+1].tolist(),
-        "dates":    dates,
-        "picks":    picks[:n],
-        "probas":   probas[:n],
-        "summary":  {
+        "equity": equity[1:n+1].tolist(),
+        "dates": dates,
+        "picks": picks[:n],
+        "probas": probas[:n],
+        "summary": {
             "annualised_return": round(ann_r, 4),
-            "annualised_vol":    round(ann_v, 4),
-            "sharpe_ratio":      round(sharpe, 4),
-            "max_drawdown":      round(dd, 4),
-            "total_return":      round(float(equity[-1]-1), 4),
+            "annualised_vol": round(ann_v, 4),
+            "sharpe_ratio": round(sharpe, 4),
+            "max_drawdown": round(dd, 4),
+            "total_return": round(float(total_ret), 4),
         }
     }
 
@@ -233,47 +258,60 @@ def aggregate_folds(fold_results):
     """Concatenate all fold equity curves and compute aggregate metrics."""
     if not fold_results:
         return {}
-    all_equity = [1.0]
-    all_dates, all_picks = [], []
-    for fold in fold_results:
-        n = len(fold["dates"])
-        for r in fold["equity"][:n]:
-            all_equity.append(all_equity[-1] * (1 + (r - all_equity[-1]) /
-                              max(all_equity[-1], 1e-8) if False else
-                              (r / (all_equity[-1] + 1e-8) - 1 + 1)))
-        # simpler: just chain the equity directly
-        pass
-
-    # Proper chaining: scale each fold's equity to start where previous ended
+    
+    # CRITICAL FIX: Properly chain equity curves from multiple folds
     chained = [1.0]
+    all_dates = []
+    all_picks = []
+    
     for fold in fold_results:
         eq = fold["equity"]
-        if not eq: continue
-        scale = chained[-1]
-        for v in eq:
-            chained.append(v * scale / (fold["equity"][0] if fold["equity"][0] != 0 else 1))
+        if not eq:
+            continue
+            
+        # Scale fold equity to start where previous fold ended
+        if len(chained) == 1:
+            # First fold - use as-is (starts at 1.0)
+            for v in eq:
+                chained.append(v)
+        else:
+            # Subsequent folds - scale to start at previous ending value
+            scale_factor = chained[-1] / eq[0] if eq[0] != 0 else 1.0
+            for v in eq:
+                chained.append(v * scale_factor)
+                
+        all_dates.extend(fold["dates"])
+        all_picks.extend(fold["picks"])
+
+    # Remove initial 1.0 seed value
     chained = np.array(chained[1:])
+    
+    # Ensure lengths match
+    n = min(len(chained), len(all_dates))
+    chained = chained[:n]
+    all_dates = all_dates[:n]
+    all_picks = all_picks[:n]
 
-    all_dates = [d for f in fold_results for d in f["dates"]]
-    all_picks = [p for f in fold_results for p in f["picks"]]
-
-    rets   = np.diff(np.concatenate([[1.0], chained])) / (np.concatenate([[1.0], chained[:-1]]) + 1e-8)
-    ann_r  = float((chained[-1] ** (252/max(len(rets),1))) - 1)
-    ann_v  = float(rets.std() * np.sqrt(252))
+    # Calculate returns from equity curve
+    rets = np.diff(np.concatenate([[1.0], chained])) / np.maximum(np.concatenate([[1.0], chained[:-1]]), 1e-8)
+    rets = rets[1:]  # Remove first artificial return
+    
+    ann_r = float((chained[-1] ** (252 / max(len(rets), 1))) - 1) if len(rets) > 0 else 0.0
+    ann_v = float(rets.std() * np.sqrt(252)) if len(rets) > 0 else 0.0
     sharpe = float(ann_r / (ann_v + 1e-8))
-    dd     = float((chained / np.maximum.accumulate(chained) - 1).min())
+    dd = float((chained / np.maximum.accumulate(chained) - 1).min()) if len(chained) > 0 else 0.0
 
     return {
-        "equity":       chained.tolist(),
-        "dates":        all_dates[:len(chained)],
-        "picks":        all_picks[:len(chained)],
+        "equity": chained.tolist(),
+        "dates": all_dates,
+        "picks": all_picks,
         "summary": {
             "annualised_return": round(ann_r, 4),
-            "annualised_vol":    round(ann_v, 4),
-            "sharpe_ratio":      round(sharpe, 4),
-            "max_drawdown":      round(dd, 4),
-            "total_return":      round(float(chained[-1]-1), 4),
-            "num_folds":         len(fold_results),
+            "annualised_vol": round(ann_v, 4),
+            "sharpe_ratio": round(sharpe, 4),
+            "max_drawdown": round(dd, 4),
+            "total_return": round(float(chained[-1] - 1), 4) if len(chained) > 0 else 0.0,
+            "num_folds": len(fold_results),
         }
     }
 
