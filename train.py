@@ -1,7 +1,8 @@
 """
 train.py
 Walk-forward training for 48-day return prediction.
-Uses ranking loss (similar to paper) + MSE.
+Single ETF selection (highest predicted return).
+Parallel-safe output naming.
 """
 
 import os, sys, json, time, argparse
@@ -30,21 +31,12 @@ MIN_TRAIN_YEARS = 3
 
 
 def ranking_loss(pred_returns, true_returns, margin=0.1):
-    """
-    Ranking loss: encourage correct ordering of returns.
-    If stock A has higher true return than B, pred should reflect that.
-    """
-    # Pairwise differences
-    n = pred_returns.shape[1]  # num_etfs
-    pred_diff = pred_returns.unsqueeze(2) - pred_returns.unsqueeze(1)  # (B, M, M)
+    """Ranking loss for ordering."""
+    n = pred_returns.shape[1]
+    pred_diff = pred_returns.unsqueeze(2) - pred_returns.unsqueeze(1)
     true_diff = true_returns.unsqueeze(2) - true_returns.unsqueeze(1)
-    
-    # Only consider pairs where true_diff > margin
     mask = (true_diff > margin).float()
-    
-    # Hinge loss: penalize if pred doesn't match order
     loss = torch.relu(0.1 - pred_diff) * mask
-    
     return loss.sum() / (mask.sum() + 1e-8)
 
 
@@ -57,17 +49,11 @@ def run_epoch(model, loader, optimiser=None):
     
     with torch.enable_grad() if training else torch.no_grad():
         for x, y in loader:
-            x, y = x.to(DEVICE), y.to(DEVICE)  # y: (B, M) returns
+            x, y = x.to(DEVICE), y.to(DEVICE)
+            pred = model(x)
             
-            pred = model(x)  # (B, M)
-            
-            # MSE loss
             mse = nn.functional.mse_loss(pred, y)
-            
-            # Ranking loss
             rank = ranking_loss(pred, y)
-            
-            # Combined
             loss = mse + 0.5 * rank
             
             if training:
@@ -87,7 +73,6 @@ def run_epoch(model, loader, optimiser=None):
 def train_on_split(feature_df, label_df, train_idx, val_idx, model_path):
     feat_names = get_feature_names()
     
-    # Normalization stats
     train_data = np.concatenate([
         feature_df[t][feat_names].iloc[train_idx[0]:train_idx[-1]+SEQ_LEN].values
         for t in TARGET_ETFS
@@ -144,8 +129,7 @@ def train_on_split(feature_df, label_df, train_idx, val_idx, model_path):
 
 def backtest_fold(model, feature_df, test_idx, mean, std, trading_cost=0.001):
     """
-    48-day return prediction backtest: Select top 2 ETFs by predicted return.
-    Hold for 48 days, then rebalance.
+    SINGLE ETF backtest: Select highest predicted 48-day return.
     """
     feat_names = get_feature_names()
     model.eval()
@@ -154,9 +138,8 @@ def backtest_fold(model, feature_df, test_idx, mean, std, trading_cost=0.001):
     picks_list = []
     
     with torch.no_grad():
-        # Step by 48 days (non-overlapping periods for clean backtest)
+        # Step by 48 days
         for t in test_idx[::PRED_HORIZON]:
-            # Skip if not enough future data
             if t + SEQ_LEN + PRED_HORIZON > len(feature_df):
                 continue
             
@@ -168,48 +151,47 @@ def backtest_fold(model, feature_df, test_idx, mean, std, trading_cost=0.001):
             x_tensor = torch.from_numpy(x).unsqueeze(0).to(DEVICE)
             pred_returns = model.predict_returns(x_tensor).cpu().numpy()[0]
             
-            # Select top 2 ETFs by predicted return
-            top_2_idx = np.argsort(pred_returns)[-2:]
-            top_2_etfs = [TARGET_ETFS[i] for i in top_2_idx]
+            # SINGLE ETF: pick highest predicted return
+            top_1_idx = int(np.argmax(pred_returns))
+            top_1_etf = TARGET_ETFS[top_1_idx]
             
-            picks_list.append(top_2_etfs)
+            picks_list.append([top_1_etf])  # Keep as list for consistency
             
-            # Calculate actual 48-day return for portfolio (equal weight)
+            # Calculate actual 48-day return
             i_today = t + SEQ_LEN - 1
             i_future = min(t + SEQ_LEN + PRED_HORIZON - 1, len(feature_df) - 1)
             
-            portfolio_ret = 0.0
-            for etf in top_2_etfs:
-                price_today = feature_df[etf]["Close"].iloc[i_today]
-                price_future = feature_df[etf]["Close"].iloc[i_future]
-                raw_ret = (price_future - price_today) / price_today
-                portfolio_ret += raw_ret / 2  # Equal weight
+            price_today = feature_df[top_1_etf]["Close"].iloc[i_today]
+            price_future = feature_df[top_1_etf]["Close"].iloc[i_future]
+            raw_ret = (price_future - price_today) / price_today
             
             # Apply trading cost (entry + exit)
-            portfolio_ret -= 2 * trading_cost
+            portfolio_ret = raw_ret - 2 * trading_cost
             
             # Sanity check
-            if abs(portfolio_ret) > 0.5:  # >50% return is suspicious
+            if abs(portfolio_ret) > 0.5:
                 portfolio_ret = 0.0
             
             portfolio_returns.append(portfolio_ret)
 
-    # Calculate equity curve from returns
+    # Calculate equity curve
     equity = [1.0]
     for r in portfolio_returns:
         equity.append(equity[-1] * (1 + r))
     
     equity = np.array(equity)
     
-    # Calculate metrics
+    # Metrics
     total_ret = equity[-1] - 1.0
     n_periods = len(portfolio_returns)
-    periods_per_year = 252 / PRED_HORIZON  # ~5.25 periods per year
+    periods_per_year = 252 / PRED_HORIZON
     
     ann_r = (equity[-1] ** (periods_per_year / n_periods)) - 1 if n_periods > 0 else 0.0
     ann_v = np.std(portfolio_returns) * np.sqrt(periods_per_year) if n_periods > 0 else 0.0
     sharpe = ann_r / (ann_v + 1e-8)
     dd = (equity / np.maximum.accumulate(equity) - 1).min() if len(equity) > 0 else 0.0
+    
+    total_ret = max(min(total_ret, 10.0), -0.99)
     
     return {
         "equity": equity.tolist(),
@@ -281,13 +263,10 @@ def run_walk_forward(feature_df, label_df, mode, model_path):
 
 
 def aggregate_folds(fold_results):
-    """
-    Fixed aggregation: properly chain returns without overflow.
-    """
+    """Fixed aggregation with overflow protection."""
     if not fold_results:
         return {}
     
-    # Collect all returns
     all_rets = []
     for fold in fold_results:
         rets = fold.get("returns", [])
@@ -297,10 +276,8 @@ def aggregate_folds(fold_results):
     if not all_rets:
         return {}
     
-    # Sanity check returns
     all_rets = [r if abs(r) < 0.5 else 0.0 for r in all_rets]
     
-    # Calculate equity curve
     equity = [1.0]
     for r in all_rets:
         equity.append(equity[-1] * (1 + r))
@@ -308,7 +285,6 @@ def aggregate_folds(fold_results):
     equity = np.array(equity)
     rets_array = np.array(all_rets)
     
-    # Calculate metrics
     total_ret = equity[-1] - 1.0
     n_periods = len(all_rets)
     periods_per_year = 252 / PRED_HORIZON
@@ -318,8 +294,7 @@ def aggregate_folds(fold_results):
     sharpe = ann_r / (ann_v + 1e-8)
     dd = (equity / np.maximum.accumulate(equity) - 1).min() if len(equity) > 0 else 0.0
     
-    # Cap extreme values
-    total_ret = max(min(total_ret, 10.0), -0.99)  # Cap at +1000% / -99%
+    total_ret = max(min(total_ret, 10.0), -0.99)
     
     return {
         "equity": equity.tolist(),
@@ -338,8 +313,8 @@ def aggregate_folds(fold_results):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN"))
-    parser.add_argument("--mode", type=str, default="both",
-                        choices=["expanding", "fixed", "both"])
+    parser.add_argument("--mode", type=str, required=True,
+                        choices=["expanding", "fixed"])
     args = parser.parse_args()
 
     print(f"Device: {DEVICE} | Mode: {args.mode}")
@@ -349,58 +324,49 @@ def main():
     feature_df = engineer_features(raw_df)
     label_df = make_labels(feature_df)
     
-    # Trim last PRED_HORIZON rows where labels are NaN
     feature_df = feature_df.iloc[:-PRED_HORIZON]
     label_df = label_df.iloc[:-PRED_HORIZON]
     
     print(f"  Data: {feature_df.index[0].date()} → {feature_df.index[-1].date()} "
           f"({len(feature_df)} rows)")
 
-    results = {}
-    modes_to_run = ["expanding", "fixed"] if args.mode == "both" else [args.mode]
+    print(f"\n{'='*50}")
+    print(f"Running {args.mode.upper()} walk-forward...")
+    t0 = time.time()
+    
+    model_path = f"model_{args.mode}.pt"
+    fold_results, final_model, mean, std = run_walk_forward(
+        feature_df, label_df, args.mode, model_path)
+    
+    elapsed = round(time.time() - t0, 1)
+    agg = aggregate_folds(fold_results)
+    
+    results = {
+        "folds": fold_results,
+        "aggregate": agg,
+        "elapsed_s": elapsed,
+    }
+    
+    print(f"\n{args.mode} complete in {elapsed}s")
+    print(f"  Ann. return: {agg['summary']['annualised_return']:.2%}")
+    print(f"  Sharpe: {agg['summary']['sharpe_ratio']:.2f}")
+    print(f"  Total return: {agg['summary']['total_return']:.2%}")
 
-    for mode in modes_to_run:
-        print(f"\n{'='*50}")
-        print(f"Running {mode.upper()} walk-forward...")
-        t0 = time.time()
-        
-        model_path = f"model_{mode}.pt"
-        fold_results, final_model, mean, std = run_walk_forward(
-            feature_df, label_df, mode, model_path)
-        
-        elapsed = round(time.time() - t0, 1)
-        agg = aggregate_folds(fold_results)
-        
-        results[mode] = {
-            "folds": fold_results,
-            "aggregate": agg,
-            "elapsed_s": elapsed,
-        }
-        
-        print(f"\n{mode} complete in {elapsed}s")
-        print(f"  Ann. return: {agg['summary']['annualised_return']:.2%}")
-        print(f"  Sharpe: {agg['summary']['sharpe_ratio']:.2f}")
-        print(f"  Total return: {agg['summary']['total_return']:.2%}")
-
-    # Determine best mode
-    best_mode = max(results, key=lambda m: results[m]["aggregate"]["summary"]["annualised_return"])
-    results["best_mode"] = best_mode
-    print(f"\nBest mode: {best_mode.upper()}")
-
-    # Save results
-    with open("walk_forward_results.json", "w") as f:
+    # PARALLEL-SAFE: Save to mode-specific file
+    output_file = f"walk_forward_results_{args.mode}.json"
+    with open(output_file, "w") as f:
         json.dump(results, f, indent=2)
-    print("Results saved → walk_forward_results.json")
+    print(f"Results saved → {output_file}")
 
-    # Save final model
+    # Save model
     checkpoint = {
         'model': final_model.state_dict(),
         'mean': mean,
         'std': std,
-        'mode': best_mode,
+        'mode': args.mode,
     }
-    torch.save(checkpoint, f"model_{best_mode}.pt")
-    print(f"Model saved → model_{best_mode}.pt")
+    torch.save(checkpoint, model_path)
+    print(f"Model saved → {model_path}")
 
     # Push to HF
     if args.hf_token:
@@ -410,12 +376,11 @@ def main():
             repo = "P2SAMAPA/etf-hrformer-model"
             api.create_repo(repo, repo_type="model", exist_ok=True)
             
-            for mode in modes_to_run:
-                api.upload_file(path_or_fileobj=f"model_{mode}.pt",
-                                path_in_repo=f"model_{mode}.pt",
-                                repo_id=repo, repo_type="model")
-            api.upload_file(path_or_fileobj="walk_forward_results.json",
-                            path_in_repo="walk_forward_results.json",
+            api.upload_file(path_or_fileobj=model_path,
+                            path_in_repo=model_path,
+                            repo_id=repo, repo_type="model")
+            api.upload_file(path_or_fileobj=output_file,
+                            path_in_repo=output_file,
                             repo_id=repo, repo_type="model")
             print("Pushed to HF Hub.")
         except Exception as e:
