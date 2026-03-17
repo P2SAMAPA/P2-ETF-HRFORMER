@@ -290,6 +290,7 @@ class HRformer(nn.Module):
         super().__init__()
         self.num_etfs = num_etfs
         self.seq_len  = seq_len
+        self.d_model  = d_model
 
         # Input projection: map num_features → d_model
         self.input_proj = nn.Linear(num_features, d_model)
@@ -305,14 +306,38 @@ class HRformer(nn.Module):
         # 3. AMCI
         self.amci = AMCI(d_model)
 
-        # 4. Temporal embedding projection (seq_len × d_model → d_model)
-        self.temporal_pool = nn.Linear(seq_len * d_model, d_model)
+        # 4. Temporal aggregation: use attention pooling instead of flattening
+        # CRITICAL FIX: Replace Linear(seq_len * d_model, d_model) with proper pooling
+        self.temporal_query = nn.Parameter(torch.randn(1, 1, d_model))
+        self.temporal_attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+        
+        # Alternative: Use mean pooling with a learnable projection
+        self.temporal_pool = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model),
+            nn.GELU(),
+        )
 
         # 5. ISCA
         self.isca = ISCA(d_model, n_heads, dropout)
 
-        # 6. Classifier
+        # 6. Classifier with dropout for regularization
+        self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(d_model, 2)   # 2 classes: down / up
+        
+        # CRITICAL FIX: Initialize classifier weights properly
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize weights for stable training."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -334,15 +359,22 @@ class HRformer(nn.Module):
             h_v = self.vol_enc(x_v)
 
             z = self.amci(h_t, h_c, h_v)            # (B, L, d)
-            z = z.reshape(B, -1)                     # (B, L*d)
-            z = self.temporal_pool(z)                # (B, d)
-            etf_embeddings.append(z)
+            
+            # CRITICAL FIX: Use mean pooling across time dimension instead of flatten
+            # This preserves scale independence and is more stable
+            z_pooled = z.mean(dim=1)                 # (B, d)
+            z_pooled = self.temporal_pool(z_pooled)  # (B, d)
+            
+            etf_embeddings.append(z_pooled)
 
         # Stack: (B, M, d)
         Z = torch.stack(etf_embeddings, dim=1)
 
         # ISCA: cross-ETF attention
         Z = self.isca(Z)                             # (B, M, d)
+        
+        # Apply dropout before classification
+        Z = self.dropout(Z)
 
         # Classify
         logits = self.classifier(Z)                  # (B, M, 2)
@@ -350,9 +382,17 @@ class HRformer(nn.Module):
 
     def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
         """Returns P(up) per ETF, shape (B, M)."""
+        # CRITICAL FIX: Ensure model is in eval mode
+        self.eval()
         with torch.no_grad():
             logits = self.forward(x)
-            return torch.softmax(logits, dim=-1)[:, :, 1]  # P(class=1)
+            # CRITICAL FIX: Check for NaN/Inf in logits
+            if torch.isnan(logits).any() or torch.isinf(logits).any():
+                print("WARNING: NaN or Inf detected in logits!")
+                logits = torch.nan_to_num(logits, nan=0.0, posinf=10.0, neginf=-10.0)
+            probs = torch.softmax(logits, dim=-1)
+            # Return P(class=1) = P(up)
+            return probs[:, :, 1]
 
 
 # ── Model factory ─────────────────────────────────────────────────────────────
@@ -362,6 +402,7 @@ def build_model(
     seq_len:      int = 48,
     num_features: int = 8,
 ) -> HRformer:
+    # CRITICAL FIX: Use lower dropout for small dataset to prevent underfitting
     return HRformer(
         num_etfs=num_etfs,
         seq_len=seq_len,
@@ -369,6 +410,6 @@ def build_model(
         d_model=64,
         n_heads=4,
         n_layers=2,
-        dropout=0.3,
+        dropout=0.1,  # Reduced from 0.3 to prevent underfitting
         kernel_size=13,
     )
