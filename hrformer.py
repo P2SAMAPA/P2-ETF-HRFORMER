@@ -1,18 +1,16 @@
 """
 hrformer.py
-Simplified HRformer for next-day ETF direction prediction.
-Removes unstable components (Fourier attention, decomposition) 
-that hurt small-dataset performance.
+HRformer for 48-day return prediction (regression).
+Matches paper architecture more closely.
 """
 
 import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class TrendEncoder(nn.Module):
-    """Standard Transformer encoder for temporal dependencies."""
+    """Standard Transformer for trend."""
     def __init__(self, d_model: int, n_heads: int, n_layers: int, dropout: float):
         super().__init__()
         layer = nn.TransformerEncoderLayer(
@@ -28,38 +26,91 @@ class TrendEncoder(nn.Module):
         return self.encoder(x)
 
 
-class StockCorrelationAttention(nn.Module):
+class FourierAttention(nn.Module):
     """
-    ISCA: Cross-ETF attention. Treats each ETF as a token.
+    Fourier Attention from paper (simplified).
     """
-    def __init__(self, d_model: int, n_heads: int, dropout: float):
+    def __init__(self, d_model: int, n_heads: int):
         super().__init__()
-        self.attn = nn.MultiheadAttention(
-            d_model, n_heads, 
-            dropout=dropout, 
-            batch_first=True
-        )
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.ff = nn.Sequential(
-            nn.Linear(d_model, d_model * 4),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model * 4, d_model),
-        )
-        self.drop = nn.Dropout(dropout)
-        
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads
+        self.Wq = nn.Linear(d_model, d_model)
+        self.Wk = nn.Linear(d_model, d_model)
+        self.Wv = nn.Linear(d_model, d_model)
+        self.Wo = nn.Linear(d_model, d_model)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, M, d) where M = num_etfs
-        attn_out, _ = self.attn(x, x, x)
-        x = self.norm1(x + self.drop(attn_out))
-        x = self.norm2(x + self.drop(self.ff(x)))
+        B, L, d = x.shape
+        H, Dh = self.n_heads, self.d_head
+
+        def proj_fft(W, inp):
+            out = W(inp)
+            out = out.view(B, L, H, Dh).permute(0, 2, 1, 3)
+            return torch.fft.rfft(out, dim=2)
+
+        Q = proj_fft(self.Wq, x)
+        K = proj_fft(self.Wk, x)
+        V = proj_fft(self.Wv, x)
+
+        scale = math.sqrt(self.d_head)
+        scores = (Q * K.conj()).real / scale
+        attn = torch.softmax(scores, dim=-1)
+        out_f = attn * V
+
+        out = torch.fft.irfft(out_f, n=L, dim=2)
+        out = out.permute(0, 2, 1, 3).reshape(B, L, d)
+        return self.Wo(out)
+
+
+class CyclicEncoder(nn.Module):
+    """Fourier-based encoder for cyclic patterns."""
+    def __init__(self, d_model: int, n_heads: int, n_layers: int, dropout: float):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            nn.ModuleDict({
+                'attn': FourierAttention(d_model, n_heads),
+                'norm1': nn.LayerNorm(d_model),
+                'ff': nn.Sequential(
+                    nn.Linear(d_model, d_model * 4),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(d_model * 4, d_model),
+                ),
+                'norm2': nn.LayerNorm(d_model),
+                'drop': nn.Dropout(dropout),
+            }) for _ in range(n_layers)
+        ])
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer['norm1'](x + layer['drop'](layer['attn'](x)))
+            x = layer['norm2'](x + layer['drop'](layer['ff'](x)))
+        return x
+
+
+class VolatilityEncoder(nn.Module):
+    """LSTM-based encoder for volatility."""
+    def __init__(self, d_model: int, dropout: float):
+        super().__init__()
+        self.lstm = nn.LSTM(d_model, d_model, num_layers=1, 
+                           batch_first=True, dropout=0)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, d_model * 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * 2, d_model),
+        )
+
+    def forward(self, x):
+        x, _ = self.lstm(x)
+        x = self.mlp(x)
         return x
 
 
 class HRformer(nn.Module):
     """
-    Simplified HRformer for next-day ETF classification.
+    HRformer matching paper: 3 components + ISCA.
+    Output: 48-day return prediction (regression).
     """
 
     def __init__(
@@ -67,42 +118,41 @@ class HRformer(nn.Module):
         num_etfs: int = 6,
         seq_len: int = 48,
         num_features: int = 8,
-        d_model: int = 128,
+        d_model: int = 128,  # Paper uses 512, but 128 works for small data
         n_heads: int = 4,
         n_layers: int = 2,
-        dropout: float = 0.3,
+        dropout: float = 0.2,
     ):
         super().__init__()
         self.num_etfs = num_etfs
-        self.seq_len = seq_len
         self.d_model = d_model
         
-        # Input normalization
-        self.input_norm = nn.LayerNorm(num_features)
-        
-        # Feature projection
+        # Input projection
         self.input_proj = nn.Linear(num_features, d_model)
         
-        # Positional encoding (learnable)
-        self.pos_encoding = nn.Parameter(torch.randn(1, seq_len, d_model) * 0.02)
+        # Three encoders for different components
+        self.trend_enc = TrendEncoder(d_model, n_heads, n_layers, dropout)
+        self.cyclic_enc = CyclicEncoder(d_model, n_heads, n_layers, dropout)
+        self.vol_enc = VolatilityEncoder(d_model, dropout)
         
-        # Temporal encoding
-        self.temporal_encoder = TrendEncoder(d_model, n_heads, n_layers, dropout)
+        # Adaptive fusion (AMCI)
+        self.gate_t = nn.Linear(d_model, d_model)
+        self.gate_c = nn.Linear(d_model, d_model)
+        self.gate_v = nn.Linear(d_model, d_model)
         
-        # Temporal pooling: attention-based aggregation
-        self.pool_query = nn.Parameter(torch.randn(1, 1, d_model))
-        self.pool_attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+        # Temporal pooling
+        self.temporal_pool = nn.AdaptiveAvgPool1d(1)
         
-        # Cross-ETF correlation
-        self.isca = StockCorrelationAttention(d_model, n_heads, dropout)
+        # ISCA: Cross-stock attention
+        self.isca = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        self.isca_norm = nn.LayerNorm(d_model)
         
-        # Classifier
-        self.classifier = nn.Sequential(
-            nn.Dropout(dropout),
+        # Output: 48-day return prediction (regression)
+        self.output_proj = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, 2)
+            nn.Linear(d_model // 2, 1)  # Single return value per ETF
         )
         
         self._init_weights()
@@ -113,58 +163,51 @@ class HRformer(nn.Module):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.LayerNorm):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
-                
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: (B, M, L, F)
-        Returns: (B, M, 2) logits
+        Returns: (B, M) predicted 48-day returns
         """
         B, M, L, F = x.shape
         
-        # Process each ETF
-        etf_tokens = []
+        # Process each ETF independently
+        etf_reps = []
         for i in range(M):
             xi = x[:, i, :, :]  # (B, L, F)
-            
-            # Normalize and project
-            xi = self.input_norm(xi)
             xi = self.input_proj(xi)  # (B, L, d)
             
-            # Add positional encoding
-            xi = xi + self.pos_encoding[:, :L, :]
+            # Three component encoders
+            h_t = self.trend_enc(xi)      # (B, L, d)
+            h_c = self.cyclic_enc(xi)     # (B, L, d)
+            h_v = self.vol_enc(xi)        # (B, L, d)
             
-            # Temporal encoding
-            xi = self.temporal_encoder(xi)  # (B, L, d)
+            # AMCI: Adaptive gating
+            g_t = torch.sigmoid(self.gate_t(h_t))
+            g_c = torch.sigmoid(self.gate_c(h_c))
+            g_v = torch.sigmoid(self.gate_v(h_v))
+            z = g_t * h_t + g_c * h_c + g_v * h_v  # (B, L, d)
             
-            # Attention-based pooling
-            query = self.pool_query.expand(B, -1, -1)  # (B, 1, d)
-            pooled, _ = self.pool_attn(query, xi, xi)  # (B, 1, d)
-            etf_tokens.append(pooled.squeeze(1))  # (B, d)
+            # Temporal pooling: (B, L, d) -> (B, d)
+            z = self.temporal_pool(z.transpose(1, 2)).squeeze(-1)  # (B, d)
+            etf_reps.append(z)
         
         # Stack: (B, M, d)
-        Z = torch.stack(etf_tokens, dim=1)
+        Z = torch.stack(etf_reps, dim=1)
         
-        # Cross-ETF correlation
-        Z = self.isca(Z)
+        # ISCA: Cross-ETF attention
+        Z_attn, _ = self.isca(Z, Z, Z)
+        Z = self.isca_norm(Z + Z_attn)
         
-        # Classify
-        logits = self.classifier(Z)  # (B, M, 2)
-        return logits
+        # Predict returns: (B, M, 1) -> (B, M)
+        returns = self.output_proj(Z).squeeze(-1)
+        return returns
     
-    def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
-        """Returns P(up) for each ETF: (B, M)"""
+    def predict_returns(self, x: torch.Tensor) -> torch.Tensor:
+        """Predict 48-day returns."""
         self.eval()
         with torch.no_grad():
-            logits = self.forward(x)
-            probs = torch.softmax(logits, dim=-1)
-            # Check for NaN
-            if torch.isnan(probs).any():
-                print("WARNING: NaN in probabilities, returning uniform")
-                return torch.ones_like(probs[:, :, 1]) / self.num_etfs
-            return probs[:, :, 1]
+            return self.forward(x)
 
 
 def build_model(num_etfs=6, seq_len=48, num_features=8):
@@ -175,5 +218,5 @@ def build_model(num_etfs=6, seq_len=48, num_features=8):
         d_model=128,
         n_heads=4,
         n_layers=2,
-        dropout=0.3,
+        dropout=0.2,
     )
