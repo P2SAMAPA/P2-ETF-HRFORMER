@@ -1,7 +1,7 @@
 """
 infer.py
 Generate 48-day ahead signal using trained model.
-Selects top 2 ETFs by predicted return.
+Selects SINGLE ETF with highest predicted return.
 """
 
 import os, sys, json, argparse
@@ -21,7 +21,7 @@ OUTPUT_PATH = "latest.json"
 
 
 def generate_signal(model, feature_df, mean, std):
-    """Generate 48-day ahead signal."""
+    """Generate 48-day ahead signal for SINGLE ETF."""
     feat_names = get_feature_names()
     t = len(feature_df) - SEQ_LEN
     
@@ -40,29 +40,68 @@ def generate_signal(model, feature_df, mean, std):
         
         print("  Predicted 48-day returns:")
         for i, ticker in enumerate(TARGET_ETFS):
-            print(f"    {ticker}: {pred_returns[i]:.4f} ({pred_returns[i]*100:.2f}%)")
+            print(f"    {ticker}: {pred_returns[i]*100:+.2f}%")
 
-    # Select top 2
-    top_2_idx = np.argsort(pred_returns)[-2:]
-    top_2_etfs = [TARGET_ETFS[i] for i in top_2_idx]
+    # SINGLE ETF: pick highest predicted return
+    top_idx = int(np.argmax(pred_returns))
+    top_etf = TARGET_ETFS[top_idx]
+    top_return = float(pred_returns[top_idx])
     
     last_data_date = feature_df.index[t + SEQ_LEN - 1]
     from pandas.tseries.offsets import BDay
     next_trade_date = (last_data_date + BDay(1)).strftime("%Y-%m-%d")
     hold_until = (last_data_date + BDay(PRED_HORIZON)).strftime("%Y-%m-%d")
 
-    print(f"\n  Selected: {', '.join(top_2_etfs)}")
-    print(f"  Hold period: {next_trade_date} → {hold_until}")
+    print(f"\n  Selected: {top_etf} (predicted: {top_return*100:+.2f}%)")
+    print(f"  Hold: {next_trade_date} → {hold_until}")
 
     return {
         "signal_date": next_trade_date,
         "hold_until": hold_until,
         "data_date": last_data_date.strftime("%Y-%m-%d"),
-        "recommended_etfs": top_2_etfs,
+        "recommended_etf": top_etf,  # SINGLE ETF
+        "predicted_return": round(top_return, 4),
         "predicted_returns": {ticker: round(float(pred_returns[i]), 4) 
                              for i, ticker in enumerate(TARGET_ETFS)},
-        "strategy": "buy_hold_48d",
+        "strategy": "buy_hold_48d_single",
     }
+
+
+def load_combined_results():
+    """Load and combine results from both modes."""
+    combined = {}
+    
+    for mode in ["expanding", "fixed"]:
+        try:
+            with open(f"walk_forward_results_{mode}.json", "r") as f:
+                combined[mode] = json.load(f)
+        except FileNotFoundError:
+            # Try HF Hub
+            try:
+                import requests
+                url = f"https://huggingface.co/P2SAMAPA/etf-hrformer-model/resolve/main/walk_forward_results_{mode}.json"
+                r = requests.get(url, timeout=10)
+                if r.status_code == 200:
+                    combined[mode] = r.json()
+            except:
+                pass
+    
+    # Determine best mode
+    best_mode = None
+    best_return = -float('inf')
+    
+    for mode in ["expanding", "fixed"]:
+        if mode in combined:
+            ret = combined[mode].get("aggregate", {}).get("summary", {}).get("annualised_return", -999)
+            if ret > best_return:
+                best_return = ret
+                best_mode = mode
+    
+    if best_mode:
+        combined["best_mode"] = best_mode
+        combined["performance"] = combined[best_mode].get("aggregate", {}).get("summary", {})
+    
+    return combined, best_mode
 
 
 def main():
@@ -70,35 +109,41 @@ def main():
     parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN"))
     args = parser.parse_args()
 
-    if not os.path.exists("walk_forward_results.json"):
-        print("Results not found — run train.py first.")
+    # Load combined results
+    results, best_mode = load_combined_results()
+    
+    if not best_mode:
+        print("No results found. Run training first.")
         return
 
-    with open("walk_forward_results.json") as f:
-        wf = json.load(f)
-
-    best_mode = wf.get("best_mode", "fixed")
-    model_path = f"model_{best_mode}.pt"
-
-    if not os.path.exists(model_path):
-        print(f"{model_path} not found.")
-        return
-
-    ann_ret = wf.get(best_mode, {}).get("aggregate", {}).get("summary", {}).get("annualised_return", 0)
+    ann_ret = results.get("performance", {}).get("annualised_return", 0)
     print(f"Best mode: {best_mode.upper()} (ann. return: {ann_ret:.2%})")
 
     print("Loading data...")
     raw_df = load_raw_df(args.hf_token)
     feature_df = engineer_features(raw_df)
     
-    # Use all available data (don't trim for inference)
-    # But ensure we have enough for lookback
     if len(feature_df) < SEQ_LEN + 10:
         print("Insufficient data")
         return
 
     print("Loading model...")
-    checkpoint = torch.load(model_path, map_location=DEVICE)
+    model_path = f"model_{best_mode}.pt"
+    
+    # Try local first, then HF
+    try:
+        checkpoint = torch.load(model_path, map_location=DEVICE)
+    except FileNotFoundError:
+        # Download from HF
+        from huggingface_hub import hf_hub_download
+        local_path = hf_hub_download(
+            repo_id="P2SAMAPA/etf-hrformer-model",
+            filename=model_path,
+            repo_type="model",
+            token=args.hf_token
+        )
+        checkpoint = torch.load(local_path, map_location=DEVICE)
+    
     model = build_model().to(DEVICE)
     model.load_state_dict(checkpoint['model'])
     
@@ -113,13 +158,14 @@ def main():
         "generated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "best_mode": best_mode,
         "signal": signal,
-        "performance": wf.get(best_mode, {}).get("aggregate", {}).get("summary", {}),
+        "performance": results.get("performance", {}),
     }
 
     with open(OUTPUT_PATH, "w") as f:
         json.dump(output, f, indent=2)
     print(f"\nSignal saved → {OUTPUT_PATH}")
 
+    # Push to HF
     if args.hf_token:
         try:
             from huggingface_hub import HfApi
