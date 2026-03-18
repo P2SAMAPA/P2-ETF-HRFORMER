@@ -2,6 +2,7 @@
 infer.py
 Generate 48-day ahead signal using trained model.
 Selects SINGLE ETF with highest predicted return.
+Now includes predictions for both expanding and shrinking modes.
 """
 
 import os, sys, json, argparse
@@ -20,8 +21,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 OUTPUT_PATH = "latest.json"
 
 
-def generate_signal(model, feature_df, mean, std):
-    """Generate 48-day ahead signal for SINGLE ETF."""
+def generate_signal(model, feature_df, mean, std, mode_name=""):
+    """Generate 48-day ahead signal for SINGLE ETF, optionally print mode name."""
     feat_names = get_feature_names()
     t = len(feature_df) - SEQ_LEN
     
@@ -38,9 +39,10 @@ def generate_signal(model, feature_df, mean, std):
         x_tensor = torch.from_numpy(x).unsqueeze(0).to(DEVICE)
         pred_returns = model.predict_returns(x_tensor).cpu().numpy()[0]
         
-        print("  Predicted 48-day returns:")
-        for i, ticker in enumerate(TARGET_ETFS):
-            print(f"    {ticker}: {pred_returns[i]*100:+.2f}%")
+        if mode_name:
+            print(f"  {mode_name} predicted 48-day returns:")
+            for i, ticker in enumerate(TARGET_ETFS):
+                print(f"    {ticker}: {pred_returns[i]*100:+.2f}%")
 
     # SINGLE ETF: pick highest predicted return
     top_idx = int(np.argmax(pred_returns))
@@ -52,19 +54,39 @@ def generate_signal(model, feature_df, mean, std):
     next_trade_date = (last_data_date + BDay(1)).strftime("%Y-%m-%d")
     hold_until = (last_data_date + BDay(PRED_HORIZON)).strftime("%Y-%m-%d")
 
-    print(f"\n  Selected: {top_etf} (predicted: {top_return*100:+.2f}%)")
-    print(f"  Hold: {next_trade_date} → {hold_until}")
-
     return {
         "signal_date": next_trade_date,
         "hold_until": hold_until,
         "data_date": last_data_date.strftime("%Y-%m-%d"),
-        "recommended_etf": top_etf,  # SINGLE ETF - only the best one
+        "recommended_etf": top_etf,
         "predicted_return": round(top_return, 4),
         "predicted_returns": {ticker: round(float(pred_returns[i]), 4) 
                              for i, ticker in enumerate(TARGET_ETFS)},
         "strategy": "buy_hold_48d_single",
     }
+
+
+def load_model(mode, device, hf_token=None):
+    """Load model and stats for a given mode, from local or HF."""
+    model_path = f"model_{mode}.pt"
+    try:
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    except FileNotFoundError:
+        from huggingface_hub import hf_hub_download
+        local_path = hf_hub_download(
+            repo_id="P2SAMAPA/etf-hrformer-model",
+            filename=model_path,
+            repo_type="model",
+            token=hf_token
+        )
+        checkpoint = torch.load(local_path, map_location=device, weights_only=False)
+    
+    model = build_model().to(device)
+    model.load_state_dict(checkpoint['model'])
+    mean = checkpoint['mean']
+    std = checkpoint['std']
+    std = np.where(std == 0, 1.0, std)
+    return model, mean, std
 
 
 def load_combined_results():
@@ -139,7 +161,6 @@ def load_combined_results():
                 print(f"  HF fetch failed for {mode}: {e}")
     
     # Determine best mode using SHARPE RATIO (more robust than just return)
-    # or composite score: return / (volatility + |drawdown|)
     best_mode = None
     best_score = -float('inf')
     
@@ -190,7 +211,7 @@ def main():
     parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN"))
     args = parser.parse_args()
 
-    # Load combined results
+    # Load combined results to get best mode
     results, best_mode = load_combined_results()
     
     if not best_mode:
@@ -208,41 +229,36 @@ def main():
         print("Insufficient data")
         return
 
-    print("Loading model...")
-    model_path = f"model_{best_mode}.pt"
-    
-    # Try local first, then HF
-    try:
-        # FIX: Add weights_only=False for PyTorch 2.6+ compatibility
-        checkpoint = torch.load(model_path, map_location=DEVICE, weights_only=False)
-    except FileNotFoundError:
-        # Download from HF
-        from huggingface_hub import hf_hub_download
-        local_path = hf_hub_download(
-            repo_id="P2SAMAPA/etf-hrformer-model",
-            filename=model_path,
-            repo_type="model",
-            token=args.hf_token
-        )
-        # FIX: Add weights_only=False here too
-        checkpoint = torch.load(local_path, map_location=DEVICE, weights_only=False)
-    
-    model = build_model().to(DEVICE)
-    model.load_state_dict(checkpoint['model'])
-    
-    mean = checkpoint['mean']
-    std = checkpoint['std']
-    std = np.where(std == 0, 1.0, std)
+    # Generate signals for both modes
+    mode_signals = {}
+    for mode in ["expanding", "shrinking"]:
+        print(f"\nLoading {mode} model...")
+        try:
+            model, mean, std = load_model(mode, DEVICE, args.hf_token)
+            signal = generate_signal(model, feature_df, mean, std, mode_name=mode)
+            mode_signals[mode] = signal
+        except Exception as e:
+            print(f"Failed to generate signal for {mode}: {e}")
+            mode_signals[mode] = None
 
-    print("Generating signal...")
-    signal = generate_signal(model, feature_df, mean, std)
+    # The hero signal is from the best mode
+    best_signal = mode_signals.get(best_mode)
+    if best_signal is None:
+        print(f"Warning: best mode {best_mode} signal missing, using fallback")
+        # fallback to any available
+        for m, sig in mode_signals.items():
+            if sig is not None:
+                best_signal = sig
+                best_mode = m
+                break
 
     output = {
         "generated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "best_mode": best_mode,
-        "signal": signal,
+        "signal": best_signal,                     # hero box uses this
+        "mode_predictions": mode_signals,           # full predictions for both modes
         "performance": results.get("performance", {}),
-        "mode_comparison": results.get("all_metrics", {}),  # Include both modes for reference
+        "mode_comparison": results.get("all_metrics", {}),
     }
 
     with open(OUTPUT_PATH, "w") as f:
