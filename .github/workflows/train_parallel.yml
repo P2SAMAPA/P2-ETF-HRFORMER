@@ -15,7 +15,7 @@ jobs:
     
     strategy:
       matrix:
-        mode: [expanding, fixed]
+        mode: [expanding, shrinking]   # <-- changed from 'fixed' to 'shrinking'
       fail-fast: false  # If one fails, continue the other
     
     steps:
