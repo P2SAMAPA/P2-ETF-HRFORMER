@@ -52,12 +52,12 @@ jobs:
           token = os.environ.get("HF_TOKEN")
           repo_id = "P2SAMAPA/etf-hrformer-model"
           
-          # Download both model files and walk-forward results
+          # Download both model files and walk-forward results (expanding + shrinking)
           files_to_download = [
               "model_expanding.pt",
-              "model_fixed.pt", 
+              "model_shrinking.pt",                     # replaced fixed with shrinking
               "walk_forward_results_expanding.json",
-              "walk_forward_results_fixed.json"
+              "walk_forward_results_shrinking.json"      # replaced fixed with shrinking
           ]
           
           for filename in files_to_download:
