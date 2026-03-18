@@ -2,11 +2,11 @@
 infer.py
 Generate 48-day ahead signal using trained model.
 Selects ETF with highest predicted return across all models.
-Maintains prediction history with actual returns.
+Maintains prediction history with actual 1‑day returns (daily rebalancing).
 """
 
 import os, sys, json, argparse
-from datetime import datetime, timedelta
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import torch
@@ -53,18 +53,19 @@ def generate_signal(model, feature_df, mean, std, mode_name=""):
     
     last_data_date = feature_df.index[t + SEQ_LEN - 1]
     from pandas.tseries.offsets import BDay
-    next_trade_date = (last_data_date + BDay(1)).strftime("%Y-%m-%d")
-    hold_until = (last_data_date + BDay(PRED_HORIZON)).strftime("%Y-%m-%d")
+    entry_date = (last_data_date + BDay(1)).strftime("%Y-%m-%d")
+    # 48‑day target date (for display only – actual return is 1‑day)
+    target_48 = (last_data_date + BDay(PRED_HORIZON)).strftime("%Y-%m-%d")
 
     return {
-        "signal_date": next_trade_date,
-        "hold_until": hold_until,
+        "entry_date": entry_date,
+        "target_48_date": target_48,
         "data_date": last_data_date.strftime("%Y-%m-%d"),
         "recommended_etf": top_etf,
         "predicted_return": round(top_return, 4),
         "predicted_returns": {ticker: round(float(pred_returns[i]), 4) 
                              for i, ticker in enumerate(TARGET_ETFS)},
-        "strategy": "buy_hold_48d_single",
+        "strategy": "daily_rebalance",
     }
 
 
@@ -102,10 +103,7 @@ def load_combined_results():
                 data = json.load(f)
                 combined[mode] = data
                 
-                # PROPER extraction: check multiple possible locations for metrics
                 metrics = {}
-                
-                # Try aggregate.summary first (correct location)
                 agg = data.get("aggregate", {})
                 if "summary" in agg:
                     summary = agg["summary"]
@@ -116,7 +114,6 @@ def load_combined_results():
                         "annualised_vol": summary.get("annualised_vol", -999),
                         "total_return": summary.get("total_return", -999),
                     }
-                # Fallback to direct keys
                 else:
                     metrics = {
                         "annualised_return": data.get("annualised_return", -999),
@@ -133,7 +130,6 @@ def load_combined_results():
                     
         except FileNotFoundError:
             print(f"  {mode}: local file not found, trying HF...")
-            # Try HF Hub
             try:
                 import requests
                 url = f"https://huggingface.co/P2SAMAPA/etf-hrformer-model/resolve/main/walk_forward_results_{mode}.json"
@@ -141,8 +137,6 @@ def load_combined_results():
                 if r.status_code == 200:
                     data = r.json()
                     combined[mode] = data
-                    
-                    # Same extraction logic for HF data
                     agg = data.get("aggregate", {})
                     if "summary" in agg:
                         summary = agg["summary"]
@@ -162,7 +156,6 @@ def load_combined_results():
             except Exception as e:
                 print(f"  HF fetch failed for {mode}: {e}")
     
-    # Determine best mode based on historical metrics (for display only, not used for hero)
     best_historical_mode = None
     best_historical_score = -float('inf')
     
@@ -205,7 +198,6 @@ def load_history(hf_token=None):
         except Exception as e:
             print(f"Error loading local history: {e}")
     else:
-        # Try to download from HF
         try:
             from huggingface_hub import hf_hub_download
             local_path = hf_hub_download(
@@ -225,38 +217,50 @@ def load_history(hf_token=None):
 def update_history(history, new_signal, feature_df, hero_mode):
     """
     Update history:
-    - Compute actual returns for any matured predictions.
+    - Compute actual 1‑day returns for any past predictions whose next trading day exists.
     - Append new prediction.
     """
     predictions = history.get("predictions", [])
     today = datetime.now().date()
     
-    # Update matured predictions
+    # Update matured predictions (next trading day exists)
     for p in predictions:
         if p.get("actual_return") is not None:
             continue  # already computed
-        exit_date_str = p.get("hold_until")
-        if not exit_date_str:
+        entry_date_str = p.get("entry_date")
+        if not entry_date_str:
             continue
-        exit_date = datetime.strptime(exit_date_str, "%Y-%m-%d").date()
+        entry_date = datetime.strptime(entry_date_str, "%Y-%m-%d").date()
+        
+        # Find next trading day after entry_date
+        if entry_date_str not in feature_df.index:
+            # Entry date might be a holiday; skip until data available
+            continue
+        entry_idx = feature_df.index.get_loc(entry_date_str)
+        if entry_idx + 1 >= len(feature_df):
+            # No next trading day yet
+            continue
+        next_date = feature_df.index[entry_idx + 1]
+        next_date_str = next_date.strftime("%Y-%m-%d")
+        exit_date = next_date.date()
+        
         if exit_date <= today:
-            # Compute actual return
-            entry_date_str = p.get("signal_date")
+            # Compute 1-day return
             ticker = p.get("recommended_etf")
             try:
                 entry_close = feature_df[ticker]["Close"].loc[entry_date_str]
-                exit_close = feature_df[ticker]["Close"].loc[exit_date_str]
+                exit_close = feature_df[ticker]["Close"].loc[next_date_str]
                 actual_return = (exit_close - entry_close) / entry_close
                 p["actual_return"] = round(float(actual_return), 4)
-                print(f"Updated {entry_date_str} {ticker}: actual return = {actual_return*100:+.2f}%")
+                print(f"Updated {entry_date_str} {ticker}: actual 1-day return = {actual_return*100:+.2f}%")
             except Exception as e:
                 print(f"Could not compute actual return for {entry_date_str}: {e}")
-                p["actual_return"] = None  # mark as failed (maybe missing data)
+                p["actual_return"] = None
     
-    # Append new prediction (actual_return = None)
+    # Append new prediction
     new_entry = {
-        "signal_date": new_signal["signal_date"],
-        "hold_until": new_signal["hold_until"],
+        "entry_date": new_signal["entry_date"],
+        "target_48_date": new_signal["target_48_date"],
         "data_date": new_signal["data_date"],
         "recommended_etf": new_signal["recommended_etf"],
         "predicted_return": new_signal["predicted_return"],
@@ -265,8 +269,8 @@ def update_history(history, new_signal, feature_df, hero_mode):
     }
     predictions.append(new_entry)
     
-    # Sort by signal_date descending (most recent first)
-    predictions.sort(key=lambda x: x["signal_date"], reverse=True)
+    # Sort by entry_date descending
+    predictions.sort(key=lambda x: x["entry_date"], reverse=True)
     history["predictions"] = predictions
     history["last_updated"] = datetime.utcnow().isoformat()
     return history
@@ -277,7 +281,6 @@ def main():
     parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN"))
     args = parser.parse_args()
 
-    # Load combined results to get historical best mode (not used for hero)
     results, historical_best_mode, mode_metrics = load_combined_results()
     
     if not historical_best_mode:
@@ -307,7 +310,7 @@ def main():
             print(f"Failed to generate signal for {mode}: {e}")
             mode_signals[mode] = None
 
-    # Determine hero model and signal by comparing predicted returns across both models
+    # Determine hero model and signal by comparing predicted returns
     hero_mode = None
     hero_signal = None
     max_return = -float('inf')
@@ -330,7 +333,7 @@ def main():
     history = load_history(args.hf_token)
     history = update_history(history, hero_signal, feature_df, hero_mode)
 
-    # Save history locally and push to HF
+    # Save history
     with open(HISTORY_PATH, "w") as f:
         json.dump(history, f, indent=2)
     print(f"History saved → {HISTORY_PATH}")
@@ -357,13 +360,11 @@ def main():
             api = HfApi(token=args.hf_token)
             repo_id = "P2SAMAPA/etf-hrformer-model"
             
-            # Upload latest.json
             api.upload_file(path_or_fileobj=OUTPUT_PATH,
                             path_in_repo=OUTPUT_PATH,
                             repo_id=repo_id, repo_type="model")
             print("Pushed latest.json to HF Hub.")
             
-            # Upload history
             api.upload_file(path_or_fileobj=HISTORY_PATH,
                             path_in_repo=HISTORY_PATH,
                             repo_id=repo_id, repo_type="model")
