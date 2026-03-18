@@ -222,7 +222,7 @@ def load_history(hf_token=None):
     return history
 
 
-def update_history(history, new_signal, feature_df):
+def update_history(history, new_signal, feature_df, hero_mode):
     """
     Update history:
     - Compute actual returns for any matured predictions.
@@ -261,7 +261,7 @@ def update_history(history, new_signal, feature_df):
         "recommended_etf": new_signal["recommended_etf"],
         "predicted_return": new_signal["predicted_return"],
         "actual_return": None,
-        "hero_mode": hero_mode,  # we'll set this later
+        "hero_mode": hero_mode,
     }
     predictions.append(new_entry)
     
@@ -328,7 +328,7 @@ def main():
 
     # Load and update history
     history = load_history(args.hf_token)
-    history = update_history(history, hero_signal, feature_df)
+    history = update_history(history, hero_signal, feature_df, hero_mode)
 
     # Save history locally and push to HF
     with open(HISTORY_PATH, "w") as f:
