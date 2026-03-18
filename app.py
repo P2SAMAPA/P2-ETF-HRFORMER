@@ -1,5 +1,5 @@
 """
-app.py — ETF Oracle · 48-Day HRformer Dashboard (Single ETF)
+app.py — ETF Oracle · 48-Day HRformer Dashboard (Single/Multi ETF)
 """
 
 import json, os
@@ -37,6 +37,7 @@ st.markdown("""
   .best-badge { display:inline-block; background:#dcfce7; border:1px solid #86efac;
                 border-radius:20px; padding:3px 14px; font-size:.8rem;
                 font-weight:700; color:#15803d; margin-left:10px; }
+  .m-sub { font-size:.75rem; color:#6b7280; margin-top:4px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -50,28 +51,44 @@ MODE_LABELS = {"expanding": "Expanding window", "fixed": "Fixed 2-year window"}
 
 @st.cache_data(ttl=3600)
 def load_data():
-    """Load latest signal."""
-    if os.path.exists("latest.json"):
-        with open("latest.json") as f:
-            return json.load(f)
+    """Load latest signal with detailed error reporting."""
+    import traceback
     
+    errors = []
+    
+    # Try local file first
+    if os.path.exists("latest.json"):
+        try:
+            with open("latest.json") as f:
+                data = json.load(f)
+                return data
+        except Exception as e:
+            errors.append(f"Local file error: {str(e)}")
+    
+    # Try HF Hub
     try:
         import requests
-        r = requests.get(
-            "https://huggingface.co/P2SAMAPA/etf-hrformer-model/resolve/main/latest.json",
-            timeout=10
-        )
+        url = "https://huggingface.co/P2SAMAPA/etf-hrformer-model/resolve/main/latest.json"
+        r = requests.get(url, timeout=10)
         if r.status_code == 200:
             return r.json()
-    except:
-        pass
+        else:
+            errors.append(f"HF Hub HTTP {r.status_code}")
+    except Exception as e:
+        errors.append(f"HF Hub error: {str(e)}")
+    
+    # Log errors to sidebar for debugging
+    if errors:
+        st.sidebar.error("Debug errors:")
+        for err in errors:
+            st.sidebar.code(err)
     
     return None
 
 
 def mcard(label, value, sub="", good=True):
     if isinstance(value, (int, float)):
-        if abs(value) > 1e6:
+        if abs(value) > 1e6 or np.isnan(value) or np.isinf(value):
             value_str, cls = "Error", "m-neu"
         else:
             cls = "m-pos" if (value >= 0) == good else "m-neg"
@@ -86,7 +103,13 @@ def chart_returns_bar(predicted_returns, selected_etf):
     tickers = list(predicted_returns.keys())
     vals = [predicted_returns[t] for t in tickers]
     
-    colors = [ETF_COLORS.get(t, "#3b82f6") if t == selected_etf else "#d1d5db" 
+    # Handle both string and list for selected_etf
+    if isinstance(selected_etf, list):
+        highlight_set = set(selected_etf)
+    else:
+        highlight_set = {selected_etf} if selected_etf != "—" else set()
+    
+    colors = [ETF_COLORS.get(t, "#3b82f6") if t in highlight_set else "#d1d5db" 
               for t in tickers]
     
     fig = go.Figure(go.Bar(
@@ -116,13 +139,55 @@ def main():
     data = load_data()
     
     st.markdown("## 📡 ETF Oracle · 48-Day Horizon")
-    st.markdown("**Single ETF selection · 48-day hold · Highest predicted return**")
+    st.markdown("**ETF selection · 48-day hold · Highest predicted return**")
+    
+    if data is None:
+        st.warning("⏳ No signal data available.")
+        st.info("""
+        **Debug steps:**
+        1. Check if `latest.json` exists in repo root
+        2. Verify HF_TOKEN is set in Streamlit secrets
+        3. Check that `P2SAMAPA/etf-hrformer-model` is public
+        """)
+        
+        # Show file listing for debugging
+        st.subheader("Debug: Files in directory")
+        import glob
+        files = glob.glob("*")
+        st.code("\n".join(files) if files else "No files found")
+        return
+    
+    sig = data.get("signal", {})
+    best_mode = data.get("best_mode", "fixed")
+    perf = data.get("performance", {})
+    
+    # Handle both single ETF (string) and multiple ETFs (array) formats
+    rec_etf_raw = sig.get("recommended_etf") or sig.get("recommended_etfs", "—")
+    if isinstance(rec_etf_raw, list):
+        etf_list = rec_etf_raw if rec_etf_raw else ["—"]
+        rec_etf = etf_list[0]  # Primary ETF for display
+    else:
+        rec_etf = rec_etf_raw if rec_etf_raw else "—"
+        etf_list = [rec_etf] if rec_etf != "—" else []
+    
+    # Get predicted return - try single value first, then lookup from dict
+    pred_ret = sig.get("predicted_return")
+    if pred_ret is None and rec_etf != "—":
+        pred_ret = sig.get("predicted_returns", {}).get(rec_etf, 0)
+    elif pred_ret is None:
+        pred_ret = 0
+    
+    pred_returns = sig.get("predicted_returns", {})
+    sdate = sig.get("signal_date", "—")
+    hold_until = sig.get("hold_until", "—")
+    data_date = sig.get("data_date", "—")
     
     # ETF legend
     cols_b = st.columns(6)
     for i, (t, name) in enumerate(ETF_NAMES.items()):
-        bg = "#dbeafe" if data and data.get("signal", {}).get("recommended_etf") == t else "#f1f5f9"
-        bc = "#93c5fd" if data and data.get("signal", {}).get("recommended_etf") == t else "#cbd5e1"
+        is_recommended = t in etf_list
+        bg = "#dbeafe" if is_recommended else "#f1f5f9"
+        bc = "#93c5fd" if is_recommended else "#cbd5e1"
         cols_b[i].markdown(
             f'<div style="background:{bg};border:1px solid {bc};border-radius:20px;'
             f'padding:5px 12px;text-align:center;font-size:.82rem;font-weight:600;">'
@@ -131,45 +196,36 @@ def main():
     
     st.divider()
     
-    if data is None:
-        st.warning("⏳ No signal data. Run infer.py first.")
-        return
-    
-    sig = data.get("signal", {})
-    best_mode = data.get("best_mode", "fixed")
-    perf = data.get("performance", {})
-    
-    rec_etf = sig.get("recommended_etf", "—")
-    pred_ret = sig.get("predicted_return", 0)
-    pred_returns = sig.get("predicted_returns", {})
-    sdate = sig.get("signal_date", "—")
-    hold_until = sig.get("hold_until", "—")
-    data_date = sig.get("data_date", "—")
-    
     # Signal card
     col_s, col_p = st.columns([1, 2], gap="large")
     
     with col_s:
         ret_class = "sig-ret" if pred_ret >= 0 else "sig-ret-neg"
+        # Show all recommended ETFs if multiple
+        etf_display = " + ".join(etf_list) if len(etf_list) > 1 else rec_etf
+        badge = "★ Top Pick" if len(etf_list) <= 1 else f"★ Top {len(etf_list)} Picks"
+        
         st.markdown(f"""
         <div class="sig-card">
           <div class="sig-label">48-Day Signal</div>
-          <div class="sig-ticker">{rec_etf}</div>
+          <div class="sig-ticker">{etf_display}</div>
           <div class="{ret_class}">{pred_ret*100:+.2f}% predicted</div>
           <div class="sig-date">Entry: {sdate}</div>
           <div class="sig-date">Exit: {hold_until}</div>
           <div class="sig-date">Data: {data_date}</div>
           <div style="margin-top:10px;color:#6366f1;font-weight:600;">
-            {MODE_LABELS.get(best_mode, best_mode)} ★
+            {MODE_LABELS.get(best_mode, best_mode)} {badge}
           </div>
         </div>
         """, unsafe_allow_html=True)
     
     with col_p:
         st.markdown("### Predicted Returns by ETF")
-        st.caption("Highlighted = selected ETF")
+        st.caption("Highlighted = selected ETF(s)")
         if pred_returns:
-            st.plotly_chart(chart_returns_bar(pred_returns, rec_etf), use_container_width=True)
+            st.plotly_chart(chart_returns_bar(pred_returns, etf_list), use_container_width=True)
+        else:
+            st.info("No prediction data available")
     
     # Performance metrics
     st.divider()
@@ -180,6 +236,10 @@ def main():
     c2.markdown(mcard("Sharpe Ratio", perf.get("sharpe_ratio", 0)), unsafe_allow_html=True)
     c3.markdown(mcard("Max Drawdown", perf.get("max_drawdown", 0), good=False), unsafe_allow_html=True)
     c4.markdown(mcard("Ann. Volatility", perf.get("annualised_vol", 0), good=False), unsafe_allow_html=True)
+    
+    # Show generation timestamp if available
+    if "generated_at" in data:
+        st.caption(f"Last updated: {data['generated_at']}")
     
     # Disclaimer
     st.markdown("""
