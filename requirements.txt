@@ -1,6 +1,21 @@
-streamlit
-plotly
-pandas
-numpy
-requests
-pyarrow
+# Core ML/Data
+torch>=2.0.0
+pandas>=1.5.0
+numpy>=1.24.0
+
+# Hugging Face
+huggingface-hub>=0.20.0
+
+# Data processing
+pyarrow>=12.0.0
+
+# Visualization
+plotly>=5.15.0
+streamlit>=1.28.0
+
+# HTTP requests
+requests>=2.31.0
+
+# Optional but recommended for better performance
+# torchvision  # only if needed
+# scikit-learn  # if you use any sklearn utils
