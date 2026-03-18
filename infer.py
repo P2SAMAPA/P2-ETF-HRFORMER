@@ -1,8 +1,7 @@
 """
 infer.py
 Generate 48-day ahead signal using trained model.
-Selects SINGLE ETF with highest predicted return.
-Now includes predictions for both expanding and shrinking modes.
+Selects ETF with highest predicted return across all models.
 """
 
 import os, sys, json, argparse
@@ -160,50 +159,36 @@ def load_combined_results():
             except Exception as e:
                 print(f"  HF fetch failed for {mode}: {e}")
     
-    # Determine best mode using SHARPE RATIO (more robust than just return)
-    best_mode = None
-    best_score = -float('inf')
+    # Determine best mode based on historical metrics (for display only, not used for hero)
+    best_historical_mode = None
+    best_historical_score = -float('inf')
     
-    print("\n  Comparing modes:")
+    print("\n  Historical performance comparison:")
     for mode in ["expanding", "shrinking"]:
         if mode in mode_metrics:
             m = mode_metrics[mode]
-            ann_ret = m.get("annualised_return", -999)
             sharpe = m.get("sharpe_ratio", -999)
-            
-            # Use Sharpe ratio as primary selector, fallback to return if Sharpe invalid
             if sharpe != -999 and not np.isnan(sharpe):
                 score = sharpe
                 metric_used = "sharpe"
             else:
-                score = ann_ret
+                score = m.get("annualised_return", -999)
                 metric_used = "return"
             
             print(f"    {mode}: score={score:.4f} (using {metric_used})")
             
-            if score > best_score:
-                best_score = score
-                best_mode = mode
+            if score > best_historical_score:
+                best_historical_score = score
+                best_historical_mode = mode
     
-    # Validate best_mode has reasonable metrics
-    if best_mode and best_mode in mode_metrics:
-        perf = mode_metrics[best_mode]
-        # Sanity check: if max_drawdown is -1.0 or total_return is absurd, use other mode
-        if perf.get("max_drawdown") == -1.0 or perf.get("total_return", 0) > 1e10:
-            print(f"\n  WARNING: {best_mode} has corrupt metrics, switching to other mode")
-            other_mode = "shrinking" if best_mode == "expanding" else "expanding"
-            if other_mode in mode_metrics:
-                best_mode = other_mode
-                perf = mode_metrics[best_mode]
+    if best_historical_mode:
+        combined["best_historical_mode"] = best_historical_mode
+        combined["historical_performance"] = mode_metrics[best_historical_mode]
+        combined["all_metrics"] = mode_metrics
+        print(f"\n  Best historical mode: {best_historical_mode.upper()}")
+        print(f"  Performance: {combined['historical_performance']}")
     
-    if best_mode:
-        combined["best_mode"] = best_mode
-        combined["performance"] = mode_metrics[best_mode]
-        combined["all_metrics"] = mode_metrics  # Include both for comparison
-        print(f"\n  Selected best mode: {best_mode.upper()}")
-        print(f"  Performance: {combined['performance']}")
-    
-    return combined, best_mode
+    return combined, best_historical_mode, mode_metrics
 
 
 def main():
@@ -211,15 +196,15 @@ def main():
     parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN"))
     args = parser.parse_args()
 
-    # Load combined results to get best mode
-    results, best_mode = load_combined_results()
+    # Load combined results to get historical best mode (not used for hero)
+    results, historical_best_mode, mode_metrics = load_combined_results()
     
-    if not best_mode:
+    if not historical_best_mode:
         print("No results found. Run training first.")
         return
 
-    print(f"\nBest mode: {best_mode.upper()}")
-    print(f"Performance metrics: {results.get('performance', {})}")
+    print(f"\nBest historical mode: {historical_best_mode.upper()}")
+    print(f"Historical performance metrics: {results.get('historical_performance', {})}")
 
     print("\nLoading data...")
     raw_df = load_raw_df(args.hf_token)
@@ -241,24 +226,33 @@ def main():
             print(f"Failed to generate signal for {mode}: {e}")
             mode_signals[mode] = None
 
-    # The hero signal is from the best mode
-    best_signal = mode_signals.get(best_mode)
-    if best_signal is None:
-        print(f"Warning: best mode {best_mode} signal missing, using fallback")
-        # fallback to any available
-        for m, sig in mode_signals.items():
-            if sig is not None:
-                best_signal = sig
-                best_mode = m
-                break
+    # Determine hero model and signal by comparing predicted returns across both models
+    hero_mode = None
+    hero_signal = None
+    max_return = -float('inf')
+    for mode, sig in mode_signals.items():
+        if sig is None:
+            continue
+        ret = sig.get("predicted_return", -float('inf'))
+        if ret > max_return:
+            max_return = ret
+            hero_mode = mode
+            hero_signal = sig
+
+    if hero_signal is None:
+        print("No valid signals generated.")
+        return
+
+    print(f"\nHero mode (highest predicted return): {hero_mode.upper()} with predicted return {max_return*100:+.2f}%")
 
     output = {
         "generated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "best_mode": best_mode,
-        "signal": best_signal,                     # hero box uses this
+        "best_historical_mode": historical_best_mode,
+        "hero_mode": hero_mode,
+        "signal": hero_signal,                     # hero box uses this
         "mode_predictions": mode_signals,           # full predictions for both modes
-        "performance": results.get("performance", {}),
-        "mode_comparison": results.get("all_metrics", {}),
+        "historical_performance": results.get("historical_performance", {}),
+        "mode_comparison": mode_metrics,            # both modes' historical metrics
     }
 
     with open(OUTPUT_PATH, "w") as f:
