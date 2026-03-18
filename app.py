@@ -1,6 +1,6 @@
 """
 app.py — ETF Oracle · 48-Day HRformer Dashboard
-Dual‑mode comparison + prediction history tracker (daily rebalancing).
+Dual‑mode comparison + prediction history tracker with performance metrics.
 """
 
 import json, os
@@ -141,7 +141,6 @@ def load_data():
         except Exception as e:
             errors.append(f"HF history error: {str(e)}")
     
-    # Ensure history is never None (will be set in main anyway)
     if history_data is None:
         history_data = {"predictions": []}
     
@@ -228,7 +227,6 @@ def main():
     best_historical_mode = data.get("best_historical_mode", "shrinking")
     mode_predictions = data.get("mode_predictions", {})
     modes_data = data.get("modes", {})
-    # FIX: Ensure history is never None
     history = data.get("history") or {"predictions": []}
     
     # Create tabs
@@ -415,9 +413,57 @@ def main():
             # Convert dates
             df["entry_date"] = pd.to_datetime(df["entry_date"]).dt.date
             df["target_48_date"] = pd.to_datetime(df["target_48_date"]).dt.date
-            # Determine status: completed if actual_return is not null
+            
+            # Filter completed trades (actual_return not null)
+            completed_df = df[df["actual_return"].notna()].copy()
+            
+            # ---- Period selector ----
+            periods = {
+                "Last 30 Days": 30,
+                "Last 90 Days": 90,
+                "Last 365 Days": 365,
+                "All Time": None
+            }
+            selected_period = st.selectbox("Select period for performance metrics", list(periods.keys()), index=0)
+            cutoff_date = None
+            if periods[selected_period] is not None:
+                cutoff_date = pd.Timestamp.now().date() - pd.Timedelta(days=periods[selected_period])
+                filtered_df = completed_df[completed_df["entry_date"] >= cutoff_date]
+            else:
+                filtered_df = completed_df
+            
+            # ---- Metrics cards ----
+            if not filtered_df.empty:
+                # Convert actual_return strings back to floats
+                filtered_df["actual_float"] = filtered_df["actual_return"].apply(
+                    lambda x: float(x.replace("%", "")) / 100 if isinstance(x, str) and x != "—" else 0.0
+                )
+                
+                n_trades = len(filtered_df)
+                win_rate = (filtered_df["actual_float"] > 0).mean()
+                avg_return = filtered_df["actual_float"].mean()
+                # Cumulative return (compounded)
+                cum_ret = (1 + filtered_df["actual_float"]).prod() - 1
+                # Sharpe ratio (annualized, assuming 252 trading days)
+                if filtered_df["actual_float"].std() > 0:
+                    sharpe = filtered_df["actual_float"].mean() / filtered_df["actual_float"].std() * np.sqrt(252)
+                else:
+                    sharpe = 0.0
+                
+                col1, col2, col3, col4, col5 = st.columns(5)
+                col1.metric("Trades", n_trades)
+                col2.metric("Win Rate", f"{win_rate:.2%}")
+                col3.metric("Avg Return", f"{avg_return:.2%}")
+                col4.metric("Total Return", f"{cum_ret:.2%}")
+                col5.metric("Sharpe (ann.)", f"{sharpe:.2f}")
+            else:
+                st.info(f"No completed trades in the selected period.")
+            
+            st.divider()
+            
+            # ---- Full history table ----
             df["status"] = df["actual_return"].apply(lambda x: "Completed" if pd.notna(x) else "Pending")
-            # Format returns
+            # Format returns for display
             df["predicted_return"] = df["predicted_return"].apply(lambda x: f"{x*100:+.2f}%")
             df["actual_return"] = df["actual_return"].apply(lambda x: f"{x*100:+.2f}%" if pd.notna(x) else "—")
             
@@ -433,28 +479,27 @@ def main():
             
             st.dataframe(df_display, use_container_width=True, hide_index=True)
             
-            # Cumulative equity curve using actual 1‑day returns
-            completed = df[df["status"] == "Completed"].copy()
-            if not completed.empty:
-                completed["actual_float"] = completed["actual_return"].apply(
-                    lambda x: float(x.replace("%", "")) / 100 if x != "—" else 0.0
+            # ---- Cumulative equity curve (all completed trades) ----
+            if not completed_df.empty:
+                completed_df["actual_float"] = completed_df["actual_return"].apply(
+                    lambda x: float(x.replace("%", "")) / 100 if isinstance(x, str) and x != "—" else 0.0
                 )
-                completed = completed.sort_values("entry_date")
+                completed_df = completed_df.sort_values("entry_date")
                 equity = [1.0]
-                for ret in completed["actual_float"]:
+                for ret in completed_df["actual_float"]:
                     equity.append(equity[-1] * (1 + ret))
                 equity = equity[1:]  # remove starting 1.0
                 
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(
-                    x=completed["entry_date"],
+                    x=completed_df["entry_date"],
                     y=equity,
                     mode="lines+markers",
                     name="Cumulative Equity (Daily Rebalancing)",
                     line=dict(color="#15803d", width=2)
                 ))
                 fig.update_layout(
-                    title="Cumulative Performance of Daily Signals (1‑day holds)",
+                    title="Cumulative Performance of All Completed Signals (1‑day holds)",
                     xaxis_title="Entry Date",
                     yaxis_title="Equity (1.0 = start)",
                     height=400,
@@ -463,7 +508,7 @@ def main():
                 st.plotly_chart(fig, use_container_width=True)
                 
                 total_return = (equity[-1] - 1) if equity else 0
-                st.metric("Total Return from Completed Daily Trades", f"{total_return*100:+.2f}%")
+                st.metric("Total Return (All Completed)", f"{total_return*100:+.2f}%")
     
     if "generated_at" in data:
         st.caption(f"Last updated: {data['generated_at']}")
