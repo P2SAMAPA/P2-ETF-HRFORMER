@@ -11,7 +11,7 @@ permissions:
 jobs:
   train:
     runs-on: ubuntu-latest
-    timeout-minutes: 150  # 2.5 hours per job
+    timeout-minutes: 300  # 2.5 hours per job
     
     strategy:
       matrix:
