@@ -1,6 +1,6 @@
 """
 app.py — ETF Oracle · 48-Day HRformer Dashboard
-Dual‑mode comparison + prediction history tracker.
+Dual‑mode comparison + prediction history tracker (daily rebalancing).
 """
 
 import json, os
@@ -231,19 +231,19 @@ def main():
     
     with tab1:
         st.markdown("## 📡 ETF Oracle · 48-Day Horizon")
-        st.markdown("**Single ETF selection · 48-day hold · Highest predicted return across both models**")
+        st.markdown("**Daily rebalancing: buy the ETF with highest predicted return, hold for one day.**")
         
         if not signal and not modes_data:
             st.warning("⏳ No data available.")
             st.info("Check HF_TOKEN and repository access.")
             return
         
-        # Extract signal info
+        # Extract signal info (updated keys)
         pred_returns = signal.get("predicted_returns", {})
         rec_etf = signal.get("recommended_etf", "—")
         pred_ret = signal.get("predicted_return", 0)
-        sdate = signal.get("signal_date", "—")
-        hold_until = signal.get("hold_until", "—")
+        entry_date = signal.get("entry_date", "—")
+        target_48_date = signal.get("target_48_date", "—")
         data_date = signal.get("data_date", "—")
         
         # ETF legend
@@ -272,9 +272,9 @@ def main():
               <div class="sig-label">48-Day Signal ({hero_mode_label})</div>
               <div class="sig-ticker">{rec_etf}</div>
               <div class="{ret_class}">{pred_ret*100:+.2f}% predicted</div>
-              <div class="sig-date">Entry: {sdate}</div>
-              <div class="sig-date">Exit: {hold_until}</div>
-              <div class="sig-date">Data: {data_date}</div>
+              <div class="sig-date">Entry (buy at open): {entry_date}</div>
+              <div class="sig-date">Target 48-day date: {target_48_date}</div>
+              <div class="sig-date">Data up to: {data_date}</div>
               <div style="margin-top:10px;color:#6366f1;font-weight:600;">
                 ★ Top Pick (Highest 48-Day Return Across Both Models)
               </div>
@@ -399,48 +399,42 @@ def main():
             st.warning("No walk-forward performance data available")
     
     with tab3:
-        st.markdown("### 📜 Prediction History")
-        st.caption("Each row shows a past signal, its predicted return, and the actual 48-day return once known.")
+        st.markdown("### 📜 Prediction History (Daily Rebalancing)")
+        st.caption("Each row shows a past signal: the 48‑day predicted return and the actual 1‑day return once available.")
         
         predictions = history.get("predictions", [])
         if not predictions:
             st.info("No history yet.")
         else:
-            # Convert to DataFrame for display
             df = pd.DataFrame(predictions)
-            # Format dates
-            df["signal_date"] = pd.to_datetime(df["signal_date"]).dt.date
-            df["hold_until"] = pd.to_datetime(df["hold_until"]).dt.date
-            # Compute status
-            today = pd.Timestamp.now().date()
-            df["status"] = df["hold_until"].apply(lambda x: "Completed" if x <= today else "Pending")
-            # Format returns as percentages
-            df["predicted_return"] = df["predicted_return"].apply(lambda x: f"{x*100:+.2f}%" if pd.notna(x) else "")
+            # Convert dates
+            df["entry_date"] = pd.to_datetime(df["entry_date"]).dt.date
+            df["target_48_date"] = pd.to_datetime(df["target_48_date"]).dt.date
+            # Determine status: completed if actual_return is not null
+            df["status"] = df["actual_return"].apply(lambda x: "Completed" if pd.notna(x) else "Pending")
+            # Format returns
+            df["predicted_return"] = df["predicted_return"].apply(lambda x: f"{x*100:+.2f}%")
             df["actual_return"] = df["actual_return"].apply(lambda x: f"{x*100:+.2f}%" if pd.notna(x) else "—")
             
-            # Select columns to show
-            display_cols = ["signal_date", "recommended_etf", "predicted_return", "actual_return", "status", "hero_mode"]
+            display_cols = ["entry_date", "recommended_etf", "predicted_return", "actual_return", "status", "hero_mode"]
             df_display = df[display_cols].rename(columns={
-                "signal_date": "Signal Date",
+                "entry_date": "Entry Date",
                 "recommended_etf": "ETF",
-                "predicted_return": "Predicted",
-                "actual_return": "Actual",
+                "predicted_return": "Predicted 48d",
+                "actual_return": "Actual 1d",
                 "status": "Status",
                 "hero_mode": "Hero Mode"
             })
             
             st.dataframe(df_display, use_container_width=True, hide_index=True)
             
-            # Cumulative equity curve of actual returns
+            # Cumulative equity curve using actual 1‑day returns
             completed = df[df["status"] == "Completed"].copy()
             if not completed.empty:
-                # Convert actual_return back to float
                 completed["actual_float"] = completed["actual_return"].apply(
                     lambda x: float(x.replace("%", "")) / 100 if x != "—" else 0.0
                 )
-                # Sort by date
-                completed = completed.sort_values("signal_date")
-                # Calculate cumulative equity
+                completed = completed.sort_values("entry_date")
                 equity = [1.0]
                 for ret in completed["actual_float"]:
                     equity.append(equity[-1] * (1 + ret))
@@ -448,24 +442,23 @@ def main():
                 
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(
-                    x=completed["signal_date"],
+                    x=completed["entry_date"],
                     y=equity,
                     mode="lines+markers",
-                    name="Cumulative Equity",
+                    name="Cumulative Equity (Daily Rebalancing)",
                     line=dict(color="#15803d", width=2)
                 ))
                 fig.update_layout(
-                    title="Cumulative Performance of Completed Signals",
-                    xaxis_title="Signal Date",
+                    title="Cumulative Performance of Daily Signals (1‑day holds)",
+                    xaxis_title="Entry Date",
                     yaxis_title="Equity (1.0 = start)",
                     height=400,
                     margin=dict(l=0, r=0, t=40, b=0)
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # Summary stats
                 total_return = (equity[-1] - 1) if equity else 0
-                st.metric("Total Return from Completed Signals", f"{total_return*100:+.2f}%")
+                st.metric("Total Return from Completed Daily Trades", f"{total_return*100:+.2f}%")
     
     if "generated_at" in data:
         st.caption(f"Last updated: {data['generated_at']}")
