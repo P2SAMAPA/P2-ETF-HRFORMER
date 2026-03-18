@@ -117,13 +117,28 @@ def load_data():
     return result
 
 
-def mcard(label, value, sub="", good=True, is_better=False):
+def mcard(label, value, sub="", good=True, is_better=False, as_percent=True):
+    """
+    Format metric card.
+    
+    Args:
+        label: Metric name
+        value: Numeric value
+        sub: Subtitle text
+        good: Whether higher is better (for color coding)
+        is_better: Whether to show "BEST" badge
+        as_percent: Whether to format as percentage (False for ratios like Sharpe)
+    """
     if isinstance(value, (int, float)):
         if abs(value) > 1e6 or np.isnan(value) or np.isinf(value):
             value_str, cls = "Error", "m-neu"
         else:
             cls = "m-pos" if (value >= 0) == good else "m-neg"
-            value_str = f"{value:+.2%}" if abs(value) < 10 else f"{value:.2f}"
+            # KEY FIX: Only use % format if as_percent=True
+            if as_percent and abs(value) < 10:
+                value_str = f"{value:+.2%}"
+            else:
+                value_str = f"{value:+.2f}"
     else:
         cls, value_str = "m-neu", str(value) if value else "—"
     
@@ -303,12 +318,13 @@ def main():
             e_vol = expanding_metrics.get("ann_vol", 0)
             
             c1, c2 = st.columns(2)
-            c1.markdown(mcard("Ann. Return", e_ret, is_better=is_better_expanding("ann_return", e_ret, fixed_metrics.get("ann_return", 0))), unsafe_allow_html=True)
-            c2.markdown(mcard("Sharpe Ratio", e_sharpe, is_better=is_better_expanding("sharpe", e_sharpe, fixed_metrics.get("sharpe", 0))), unsafe_allow_html=True)
+            # KEY FIX: as_percent=True for returns, as_percent=False for Sharpe
+            c1.markdown(mcard("Ann. Return", e_ret, is_better=is_better_expanding("ann_return", e_ret, fixed_metrics.get("ann_return", 0)), as_percent=True), unsafe_allow_html=True)
+            c2.markdown(mcard("Sharpe Ratio", e_sharpe, is_better=is_better_expanding("sharpe", e_sharpe, fixed_metrics.get("sharpe", 0)), as_percent=False), unsafe_allow_html=True)
             
             c3, c4 = st.columns(2)
-            c3.markdown(mcard("Max Drawdown", e_dd, good=False, is_better=is_better_expanding("max_dd", e_dd, fix_max_drawdown(fixed_metrics.get("max_dd", 0)))), unsafe_allow_html=True)
-            c4.markdown(mcard("Ann. Volatility", e_vol, good=False, is_better=is_better_expanding("ann_vol", e_vol, fixed_metrics.get("ann_vol", 0))), unsafe_allow_html=True)
+            c3.markdown(mcard("Max Drawdown", e_dd, good=False, is_better=is_better_expanding("max_dd", e_dd, fix_max_drawdown(fixed_metrics.get("max_dd", 0))), as_percent=True), unsafe_allow_html=True)
+            c4.markdown(mcard("Ann. Volatility", e_vol, good=False, is_better=is_better_expanding("ann_vol", e_vol, fixed_metrics.get("ann_vol", 0)), as_percent=True), unsafe_allow_html=True)
         
         with col_f:
             st.markdown(f'<div class="mode-header"><span class="fixed-color">●</span> Fixed 2-Year Window</div>', unsafe_allow_html=True)
@@ -319,12 +335,13 @@ def main():
             f_vol = fixed_metrics.get("ann_vol", 0)
             
             c1, c2 = st.columns(2)
-            c1.markdown(mcard("Ann. Return", f_ret, is_better=not is_better_expanding("ann_return", e_ret, f_ret)), unsafe_allow_html=True)
-            c2.markdown(mcard("Sharpe Ratio", f_sharpe, is_better=not is_better_expanding("sharpe", e_sharpe, f_sharpe)), unsafe_allow_html=True)
+            # KEY FIX: as_percent=True for returns, as_percent=False for Sharpe
+            c1.markdown(mcard("Ann. Return", f_ret, is_better=not is_better_expanding("ann_return", e_ret, f_ret), as_percent=True), unsafe_allow_html=True)
+            c2.markdown(mcard("Sharpe Ratio", f_sharpe, is_better=not is_better_expanding("sharpe", e_sharpe, f_sharpe), as_percent=False), unsafe_allow_html=True)
             
             c3, c4 = st.columns(2)
-            c3.markdown(mcard("Max Drawdown", f_dd, good=False, is_better=not is_better_expanding("max_dd", e_dd, f_dd)), unsafe_allow_html=True)
-            c4.markdown(mcard("Ann. Volatility", f_vol, good=False, is_better=not is_better_expanding("ann_vol", e_vol, f_vol)), unsafe_allow_html=True)
+            c3.markdown(mcard("Max Drawdown", f_dd, good=False, is_better=not is_better_expanding("max_dd", e_dd, f_dd), as_percent=True), unsafe_allow_html=True)
+            c4.markdown(mcard("Ann. Volatility", f_vol, good=False, is_better=not is_better_expanding("ann_vol", e_vol, f_vol), as_percent=True), unsafe_allow_html=True)
         
         # Summary comparison
         st.markdown("---")
@@ -358,10 +375,10 @@ def main():
 def show_single_mode(metrics, mode):
     """Display metrics for a single mode when only one is available."""
     col1, col2, col3, col4 = st.columns(4)
-    col1.markdown(mcard("Ann. Return", metrics.get("ann_return", 0)), unsafe_allow_html=True)
-    col2.markdown(mcard("Sharpe Ratio", metrics.get("sharpe", 0)), unsafe_allow_html=True)
-    col3.markdown(mcard("Max Drawdown", fix_max_drawdown(metrics.get("max_dd", 0)), good=False), unsafe_allow_html=True)
-    col4.markdown(mcard("Ann. Volatility", metrics.get("ann_vol", 0), good=False), unsafe_allow_html=True)
+    col1.markdown(mcard("Ann. Return", metrics.get("ann_return", 0), as_percent=True), unsafe_allow_html=True)
+    col2.markdown(mcard("Sharpe Ratio", metrics.get("sharpe", 0), as_percent=False), unsafe_allow_html=True)
+    col3.markdown(mcard("Max Drawdown", fix_max_drawdown(metrics.get("max_dd", 0)), good=False, as_percent=True), unsafe_allow_html=True)
+    col4.markdown(mcard("Ann. Volatility", metrics.get("ann_vol", 0), good=False, as_percent=True), unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
