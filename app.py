@@ -141,6 +141,10 @@ def load_data():
         except Exception as e:
             errors.append(f"HF history error: {str(e)}")
     
+    # Ensure history is never None (will be set in main anyway)
+    if history_data is None:
+        history_data = {"predictions": []}
+    
     result["history"] = history_data
     
     if errors and not result["modes"] and not result["signal"]:
@@ -224,7 +228,8 @@ def main():
     best_historical_mode = data.get("best_historical_mode", "shrinking")
     mode_predictions = data.get("mode_predictions", {})
     modes_data = data.get("modes", {})
-    history = data.get("history", {"predictions": []})
+    # FIX: Ensure history is never None
+    history = data.get("history") or {"predictions": []}
     
     # Create tabs
     tab1, tab2, tab3 = st.tabs(["📈 Current Signal", "📊 Performance Comparison", "📜 Prediction History"])
