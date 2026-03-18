@@ -1,5 +1,6 @@
 """
 app.py — ETF Oracle · 48-Day HRformer Dashboard (Dual Mode Comparison)
+Expanding vs Shrinking Window
 """
 
 import json, os
@@ -41,7 +42,7 @@ st.markdown("""
   .mode-header { font-size:1.1rem; font-weight:700; color:#374151; 
                  margin-bottom:12px; padding-bottom:8px; border-bottom:2px solid #e5e7eb; }
   .expanding-color { color: #6366f1; }
-  .fixed-color { color: #f59e0b; }
+  .shrinking-color { color: #f59e0b; }   /* Orange for shrinking */
   .winner { background:#dcfce7; border:1px solid #86efac; border-radius:6px; 
             padding:2px 8px; font-size:.75rem; font-weight:700; color:#15803d; }
 </style>
@@ -51,8 +52,8 @@ ETF_COLORS = {"TLT":"#3b82f6","VNQ":"#22c55e","SLV":"#94a3b8",
               "GLD":"#eab308","LQD":"#a855f7","HYG":"#f97316"}
 ETF_NAMES  = {"TLT":"20Y Treasury","VNQ":"Real Estate","SLV":"Silver",
               "GLD":"Gold","LQD":"IG Corporate","HYG":"High Yield"}
-MODE_COLORS = {"expanding": "#6366f1", "fixed": "#f59e0b"}
-MODE_LABELS = {"expanding": "Expanding Window", "fixed": "Fixed 2-Year Window"}
+MODE_COLORS = {"expanding": "#6366f1", "shrinking": "#f59e0b"}
+MODE_LABELS = {"expanding": "Expanding Window", "shrinking": "Shrinking Window"}
 
 
 @st.cache_data(ttl=3600)
@@ -83,7 +84,7 @@ def load_data():
     result["signal"] = latest_data
     
     # Load both walk-forward results
-    for mode in ["expanding", "fixed"]:
+    for mode in ["expanding", "shrinking"]:
         mode_data = None
         
         # Try local first
@@ -226,7 +227,7 @@ def main():
     
     # Extract signal info
     sig = latest.get("signal", {}) if latest else {}
-    best_mode = latest.get("best_mode", "fixed") if latest else "fixed"
+    best_mode = latest.get("best_mode", "shrinking") if latest else "shrinking"
     pred_returns = sig.get("predicted_returns", {})
     
     # SINGLE ETF: Pick highest return
@@ -296,18 +297,18 @@ def main():
     
     # Get metrics for both modes
     expanding_metrics = get_summary_metrics(modes_data.get("expanding"))
-    fixed_metrics = get_summary_metrics(modes_data.get("fixed"))
+    shrinking_metrics = get_summary_metrics(modes_data.get("shrinking"))
     
     # Determine which is better for each metric (higher is better for return/sharpe, lower for dd/vol)
-    def is_better_expanding(metric, val_exp, val_fix):
+    def is_better_expanding(metric, val_exp, val_shrink):
         if metric in ["ann_return", "sharpe"]:
-            return val_exp > val_fix if val_exp != val_fix else best_mode == "expanding"
+            return val_exp > val_shrink if val_exp != val_shrink else best_mode == "expanding"
         else:  # max_dd, ann_vol (lower is better)
-            return abs(val_exp) < abs(val_fix) if val_exp != val_fix else best_mode == "expanding"
+            return abs(val_exp) < abs(val_shrink) if val_exp != val_shrink else best_mode == "expanding"
     
     # Create comparison table
-    if expanding_metrics and fixed_metrics:
-        col_e, col_f = st.columns(2)
+    if expanding_metrics and shrinking_metrics:
+        col_e, col_s = st.columns(2)
         
         with col_e:
             st.markdown(f'<div class="mode-header"><span class="expanding-color">●</span> Expanding Window</div>', unsafe_allow_html=True)
@@ -319,43 +320,43 @@ def main():
             
             c1, c2 = st.columns(2)
             # KEY FIX: as_percent=True for returns, as_percent=False for Sharpe
-            c1.markdown(mcard("Ann. Return", e_ret, is_better=is_better_expanding("ann_return", e_ret, fixed_metrics.get("ann_return", 0)), as_percent=True), unsafe_allow_html=True)
-            c2.markdown(mcard("Sharpe Ratio", e_sharpe, is_better=is_better_expanding("sharpe", e_sharpe, fixed_metrics.get("sharpe", 0)), as_percent=False), unsafe_allow_html=True)
+            c1.markdown(mcard("Ann. Return", e_ret, is_better=is_better_expanding("ann_return", e_ret, shrinking_metrics.get("ann_return", 0)), as_percent=True), unsafe_allow_html=True)
+            c2.markdown(mcard("Sharpe Ratio", e_sharpe, is_better=is_better_expanding("sharpe", e_sharpe, shrinking_metrics.get("sharpe", 0)), as_percent=False), unsafe_allow_html=True)
             
             c3, c4 = st.columns(2)
-            c3.markdown(mcard("Max Drawdown", e_dd, good=False, is_better=is_better_expanding("max_dd", e_dd, fix_max_drawdown(fixed_metrics.get("max_dd", 0))), as_percent=True), unsafe_allow_html=True)
-            c4.markdown(mcard("Ann. Volatility", e_vol, good=False, is_better=is_better_expanding("ann_vol", e_vol, fixed_metrics.get("ann_vol", 0)), as_percent=True), unsafe_allow_html=True)
+            c3.markdown(mcard("Max Drawdown", e_dd, good=False, is_better=is_better_expanding("max_dd", e_dd, fix_max_drawdown(shrinking_metrics.get("max_dd", 0))), as_percent=True), unsafe_allow_html=True)
+            c4.markdown(mcard("Ann. Volatility", e_vol, good=False, is_better=is_better_expanding("ann_vol", e_vol, shrinking_metrics.get("ann_vol", 0)), as_percent=True), unsafe_allow_html=True)
         
-        with col_f:
-            st.markdown(f'<div class="mode-header"><span class="fixed-color">●</span> Fixed 2-Year Window</div>', unsafe_allow_html=True)
+        with col_s:
+            st.markdown(f'<div class="mode-header"><span class="shrinking-color">●</span> Shrinking Window</div>', unsafe_allow_html=True)
             
-            f_ret = fixed_metrics.get("ann_return", 0)
-            f_sharpe = fixed_metrics.get("sharpe", 0)
-            f_dd = fix_max_drawdown(fixed_metrics.get("max_dd", 0))
-            f_vol = fixed_metrics.get("ann_vol", 0)
+            s_ret = shrinking_metrics.get("ann_return", 0)
+            s_sharpe = shrinking_metrics.get("sharpe", 0)
+            s_dd = fix_max_drawdown(shrinking_metrics.get("max_dd", 0))
+            s_vol = shrinking_metrics.get("ann_vol", 0)
             
             c1, c2 = st.columns(2)
             # KEY FIX: as_percent=True for returns, as_percent=False for Sharpe
-            c1.markdown(mcard("Ann. Return", f_ret, is_better=not is_better_expanding("ann_return", e_ret, f_ret), as_percent=True), unsafe_allow_html=True)
-            c2.markdown(mcard("Sharpe Ratio", f_sharpe, is_better=not is_better_expanding("sharpe", e_sharpe, f_sharpe), as_percent=False), unsafe_allow_html=True)
+            c1.markdown(mcard("Ann. Return", s_ret, is_better=not is_better_expanding("ann_return", e_ret, s_ret), as_percent=True), unsafe_allow_html=True)
+            c2.markdown(mcard("Sharpe Ratio", s_sharpe, is_better=not is_better_expanding("sharpe", e_sharpe, s_sharpe), as_percent=False), unsafe_allow_html=True)
             
             c3, c4 = st.columns(2)
-            c3.markdown(mcard("Max Drawdown", f_dd, good=False, is_better=not is_better_expanding("max_dd", e_dd, f_dd), as_percent=True), unsafe_allow_html=True)
-            c4.markdown(mcard("Ann. Volatility", f_vol, good=False, is_better=not is_better_expanding("ann_vol", e_vol, f_vol), as_percent=True), unsafe_allow_html=True)
+            c3.markdown(mcard("Max Drawdown", s_dd, good=False, is_better=not is_better_expanding("max_dd", e_dd, s_dd), as_percent=True), unsafe_allow_html=True)
+            c4.markdown(mcard("Ann. Volatility", s_vol, good=False, is_better=not is_better_expanding("ann_vol", e_vol, s_vol), as_percent=True), unsafe_allow_html=True)
         
         # Summary comparison
         st.markdown("---")
         if best_mode == "expanding":
             st.success(f"**Selected Model:** Expanding Window (better historical performance)")
         else:
-            st.success(f"**Selected Model:** Fixed 2-Year Window (better historical performance)")
+            st.success(f"**Selected Model:** Shrinking Window (better historical performance)")
             
     elif expanding_metrics:
         st.info("Only Expanding Window results available")
         show_single_mode(expanding_metrics, "expanding")
-    elif fixed_metrics:
-        st.info("Only Fixed Window results available")
-        show_single_mode(fixed_metrics, "fixed")
+    elif shrinking_metrics:
+        st.info("Only Shrinking Window results available")
+        show_single_mode(shrinking_metrics, "shrinking")
     else:
         st.warning("No walk-forward performance data available")
     
