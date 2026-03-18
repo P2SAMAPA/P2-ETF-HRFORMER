@@ -59,7 +59,7 @@ def generate_signal(model, feature_df, mean, std):
         "signal_date": next_trade_date,
         "hold_until": hold_until,
         "data_date": last_data_date.strftime("%Y-%m-%d"),
-        "recommended_etf": top_etf,  # SINGLE ETF
+        "recommended_etf": top_etf,  # SINGLE ETF - only the best one
         "predicted_return": round(top_return, 4),
         "predicted_returns": {ticker: round(float(pred_returns[i]), 4) 
                              for i, ticker in enumerate(TARGET_ETFS)},
@@ -68,38 +68,119 @@ def generate_signal(model, feature_df, mean, std):
 
 
 def load_combined_results():
-    """Load and combine results from both modes."""
+    """Load and combine results from both modes with PROPER metric extraction."""
     combined = {}
+    mode_metrics = {}
     
     for mode in ["expanding", "fixed"]:
         try:
             with open(f"walk_forward_results_{mode}.json", "r") as f:
-                combined[mode] = json.load(f)
+                data = json.load(f)
+                combined[mode] = data
+                
+                # PROPER extraction: check multiple possible locations for metrics
+                metrics = {}
+                
+                # Try aggregate.summary first (correct location)
+                agg = data.get("aggregate", {})
+                if "summary" in agg:
+                    summary = agg["summary"]
+                    metrics = {
+                        "annualised_return": summary.get("annualised_return", -999),
+                        "sharpe_ratio": summary.get("sharpe_ratio", -999),
+                        "max_drawdown": summary.get("max_drawdown", -999),
+                        "annualised_vol": summary.get("annualised_vol", -999),
+                        "total_return": summary.get("total_return", -999),
+                    }
+                # Fallback to direct keys
+                else:
+                    metrics = {
+                        "annualised_return": data.get("annualised_return", -999),
+                        "sharpe_ratio": data.get("sharpe_ratio", -999),
+                        "max_drawdown": data.get("max_drawdown", -999),
+                        "annualised_vol": data.get("annualised_vol", -999),
+                        "total_return": data.get("total_return", -999),
+                    }
+                
+                mode_metrics[mode] = metrics
+                print(f"\n  {mode.upper()} metrics found:")
+                for k, v in metrics.items():
+                    print(f"    {k}: {v}")
+                    
         except FileNotFoundError:
+            print(f"  {mode}: local file not found, trying HF...")
             # Try HF Hub
             try:
                 import requests
                 url = f"https://huggingface.co/P2SAMAPA/etf-hrformer-model/resolve/main/walk_forward_results_{mode}.json"
                 r = requests.get(url, timeout=10)
                 if r.status_code == 200:
-                    combined[mode] = r.json()
-            except:
-                pass
+                    data = r.json()
+                    combined[mode] = data
+                    
+                    # Same extraction logic for HF data
+                    agg = data.get("aggregate", {})
+                    if "summary" in agg:
+                        summary = agg["summary"]
+                        mode_metrics[mode] = {
+                            "annualised_return": summary.get("annualised_return", -999),
+                            "sharpe_ratio": summary.get("sharpe_ratio", -999),
+                            "max_drawdown": summary.get("max_drawdown", -999),
+                            "annualised_vol": summary.get("annualised_vol", -999),
+                        }
+                    else:
+                        mode_metrics[mode] = {
+                            "annualised_return": data.get("annualised_return", -999),
+                            "sharpe_ratio": data.get("sharpe_ratio", -999),
+                            "max_drawdown": data.get("max_drawdown", -999),
+                            "annualised_vol": data.get("annualised_vol", -999),
+                        }
+            except Exception as e:
+                print(f"  HF fetch failed for {mode}: {e}")
     
-    # Determine best mode
+    # Determine best mode using SHARPE RATIO (more robust than just return)
+    # or composite score: return / (volatility + |drawdown|)
     best_mode = None
-    best_return = -float('inf')
+    best_score = -float('inf')
     
+    print("\n  Comparing modes:")
     for mode in ["expanding", "fixed"]:
-        if mode in combined:
-            ret = combined[mode].get("aggregate", {}).get("summary", {}).get("annualised_return", -999)
-            if ret > best_return:
-                best_return = ret
+        if mode in mode_metrics:
+            m = mode_metrics[mode]
+            ann_ret = m.get("annualised_return", -999)
+            sharpe = m.get("sharpe_ratio", -999)
+            
+            # Use Sharpe ratio as primary selector, fallback to return if Sharpe invalid
+            if sharpe != -999 and not np.isnan(sharpe):
+                score = sharpe
+                metric_used = "sharpe"
+            else:
+                score = ann_ret
+                metric_used = "return"
+            
+            print(f"    {mode}: score={score:.4f} (using {metric_used})")
+            
+            if score > best_score:
+                best_score = score
                 best_mode = mode
+    
+    # Validate best_mode has reasonable metrics
+    if best_mode and best_mode in mode_metrics:
+        perf = mode_metrics[best_mode]
+        # Sanity check: if max_drawdown is -1.0 or total_return is absurd, use other mode
+        if perf.get("max_drawdown") == -1.0 or perf.get("total_return", 0) > 1e10:
+            print(f"\n  WARNING: {best_mode} has corrupt metrics, switching to other mode")
+            other_mode = "fixed" if best_mode == "expanding" else "expanding"
+            if other_mode in mode_metrics:
+                best_mode = other_mode
+                perf = mode_metrics[best_mode]
     
     if best_mode:
         combined["best_mode"] = best_mode
-        combined["performance"] = combined[best_mode].get("aggregate", {}).get("summary", {})
+        combined["performance"] = mode_metrics[best_mode]
+        combined["all_metrics"] = mode_metrics  # Include both for comparison
+        print(f"\n  Selected best mode: {best_mode.upper()}")
+        print(f"  Performance: {combined['performance']}")
     
     return combined, best_mode
 
@@ -116,10 +197,10 @@ def main():
         print("No results found. Run training first.")
         return
 
-    ann_ret = results.get("performance", {}).get("annualised_return", 0)
-    print(f"Best mode: {best_mode.upper()} (ann. return: {ann_ret:.2%})")
+    print(f"\nBest mode: {best_mode.upper()}")
+    print(f"Performance metrics: {results.get('performance', {})}")
 
-    print("Loading data...")
+    print("\nLoading data...")
     raw_df = load_raw_df(args.hf_token)
     feature_df = engineer_features(raw_df)
     
@@ -159,6 +240,7 @@ def main():
         "best_mode": best_mode,
         "signal": signal,
         "performance": results.get("performance", {}),
+        "mode_comparison": results.get("all_metrics", {}),  # Include both modes for reference
     }
 
     with open(OUTPUT_PATH, "w") as f:
