@@ -3,6 +3,7 @@ infer.py
 Generate 48-day ahead signal using trained model.
 Selects ETF with highest predicted return across all models.
 Maintains prediction history with actual 1‑day returns (daily rebalancing).
+Includes migration for old history entries.
 """
 
 import os, sys, json, argparse
@@ -217,19 +218,55 @@ def load_history(hf_token=None):
 def update_history(history, new_signal, feature_df, hero_mode):
     """
     Update history:
+    - Migrate old entries (from previous format) to new format.
     - Compute actual 1‑day returns for any past predictions whose next trading day exists.
     - Append new prediction.
     """
     predictions = history.get("predictions", [])
+    
+    # ------------------------------------------------------------------
+    # Migrate any old entries (with 'signal_date') to new format
+    # ------------------------------------------------------------------
+    migrated = []
+    for p in predictions:
+        # If already has 'entry_date', assume it's new format
+        if "entry_date" in p:
+            migrated.append(p)
+            continue
+        
+        # Otherwise, try to convert from old format
+        if "signal_date" in p:
+            new_entry = {
+                "entry_date": p.get("signal_date"),
+                "target_48_date": p.get("hold_until", ""),  # old field
+                "data_date": p.get("data_date", ""),
+                "recommended_etf": p.get("recommended_etf"),
+                "predicted_return": p.get("predicted_return"),
+                "actual_return": None,  # force recompute as 1-day
+                "hero_mode": p.get("hero_mode", hero_mode),
+            }
+            # Ensure dates are strings
+            migrated.append(new_entry)
+            print(f"Migrated old entry from {new_entry['entry_date']}")
+        else:
+            # Cannot migrate, drop?
+            print(f"Warning: dropping unrecognized history entry: {p}")
+    
+    predictions = migrated
+    
+    # ------------------------------------------------------------------
+    # Compute actual returns for matured predictions (1‑day)
+    # ------------------------------------------------------------------
     today = datetime.now().date()
     
-    # Update matured predictions (next trading day exists)
     for p in predictions:
         if p.get("actual_return") is not None:
             continue  # already computed
+        
         entry_date_str = p.get("entry_date")
         if not entry_date_str:
             continue
+        
         entry_date = datetime.strptime(entry_date_str, "%Y-%m-%d").date()
         
         # Find next trading day after entry_date
@@ -257,7 +294,9 @@ def update_history(history, new_signal, feature_df, hero_mode):
                 print(f"Could not compute actual return for {entry_date_str}: {e}")
                 p["actual_return"] = None
     
+    # ------------------------------------------------------------------
     # Append new prediction
+    # ------------------------------------------------------------------
     new_entry = {
         "entry_date": new_signal["entry_date"],
         "target_48_date": new_signal["target_48_date"],
@@ -269,7 +308,7 @@ def update_history(history, new_signal, feature_df, hero_mode):
     }
     predictions.append(new_entry)
     
-    # Sort by entry_date descending
+    # Sort by entry_date descending (most recent first)
     predictions.sort(key=lambda x: x["entry_date"], reverse=True)
     history["predictions"] = predictions
     history["last_updated"] = datetime.utcnow().isoformat()
@@ -333,7 +372,7 @@ def main():
     history = load_history(args.hf_token)
     history = update_history(history, hero_signal, feature_df, hero_mode)
 
-    # Save history
+    # Save history locally and push to HF
     with open(HISTORY_PATH, "w") as f:
         json.dump(history, f, indent=2)
     print(f"History saved → {HISTORY_PATH}")
