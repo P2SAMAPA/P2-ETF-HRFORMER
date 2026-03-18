@@ -1,6 +1,6 @@
 """
 app.py — ETF Oracle · 48-Day HRformer Dashboard (Dual Mode Comparison)
-Expanding vs Shrinking Window
+Expanding vs Shrinking Window — Shows predictions from both models.
 """
 
 import json, os
@@ -42,9 +42,14 @@ st.markdown("""
   .mode-header { font-size:1.1rem; font-weight:700; color:#374151; 
                  margin-bottom:12px; padding-bottom:8px; border-bottom:2px solid #e5e7eb; }
   .expanding-color { color: #6366f1; }
-  .shrinking-color { color: #f59e0b; }   /* Orange for shrinking */
+  .shrinking-color { color: #f59e0b; }
   .winner { background:#dcfce7; border:1px solid #86efac; border-radius:6px; 
             padding:2px 8px; font-size:.75rem; font-weight:700; color:#15803d; }
+  .pred-card { background:#f9fafb; border-radius:10px; padding:15px; 
+               border-left:4px solid; margin-bottom:10px; }
+  .pred-expanding { border-left-color: #6366f1; }
+  .pred-shrinking { border-left-color: #f59e0b; }
+  .pred-etf { font-size:1.5rem; font-weight:700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -59,7 +64,7 @@ MODE_LABELS = {"expanding": "Expanding Window", "shrinking": "Shrinking Window"}
 @st.cache_data(ttl=3600)
 def load_data():
     """Load latest signal and both walk-forward results."""
-    result = {"signal": None, "modes": {}}
+    result = {"signal": None, "modes": {}, "mode_predictions": {}}
     errors = []
     
     # Load latest.json (signal data)
@@ -81,9 +86,14 @@ def load_data():
         except Exception as e:
             errors.append(f"HF latest.json error: {str(e)}")
     
-    result["signal"] = latest_data
+    if latest_data:
+        result["signal"] = latest_data.get("signal")
+        result["best_mode"] = latest_data.get("best_mode")
+        result["mode_predictions"] = latest_data.get("mode_predictions", {})
+        result["performance"] = latest_data.get("performance", {})
+        result["mode_comparison"] = latest_data.get("mode_comparison", {})
     
-    # Load both walk-forward results
+    # Load walk-forward results for both modes (for performance metrics)
     for mode in ["expanding", "shrinking"]:
         mode_data = None
         
@@ -110,7 +120,7 @@ def load_data():
         if mode_data:
             result["modes"][mode] = mode_data
     
-    if errors and not result["modes"]:
+    if errors and not result["modes"] and not result["signal"]:
         st.sidebar.error("Debug errors:")
         for err in errors:
             st.sidebar.code(err)
@@ -135,7 +145,6 @@ def mcard(label, value, sub="", good=True, is_better=False, as_percent=True):
             value_str, cls = "Error", "m-neu"
         else:
             cls = "m-pos" if (value >= 0) == good else "m-neg"
-            # KEY FIX: Only use % format if as_percent=True
             if as_percent and abs(value) < 10:
                 value_str = f"{value:+.2%}"
             else:
@@ -153,7 +162,6 @@ def get_summary_metrics(mode_data):
     if not mode_data:
         return {}
     
-    # Try different possible structures
     agg = mode_data.get("aggregate", {})
     summary = agg.get("summary", {})
     
@@ -177,7 +185,7 @@ def get_summary_metrics(mode_data):
 def fix_max_drawdown(val):
     """Fix corrupt max drawdown values."""
     if val is None or np.isnan(val) or val < -1 or val > 0 or abs(val) > 0.5:
-        return -0.15  # Default reasonable value
+        return -0.15
     return val
 
 
@@ -213,34 +221,30 @@ def chart_returns_bar(predicted_returns, selected_etf):
 
 def main():
     data = load_data()
-    latest = data.get("signal", {})
+    signal = data.get("signal", {})
+    best_mode = data.get("best_mode", "shrinking")
+    mode_predictions = data.get("mode_predictions", {})
     modes_data = data.get("modes", {})
     
     st.markdown("## 📡 ETF Oracle · 48-Day Horizon")
     st.markdown("**Single ETF selection · 48-day hold · Highest predicted return**")
     
     # Check if we have any data
-    if not latest and not modes_data:
+    if not signal and not modes_data:
         st.warning("⏳ No data available.")
         st.info("Check HF_TOKEN and repository access.")
         return
     
     # Extract signal info
-    sig = latest.get("signal", {}) if latest else {}
-    best_mode = latest.get("best_mode", "shrinking") if latest else "shrinking"
-    pred_returns = sig.get("predicted_returns", {})
+    pred_returns = signal.get("predicted_returns", {})
     
-    # SINGLE ETF: Pick highest return
-    if pred_returns:
-        sorted_etfs = sorted(pred_returns.items(), key=lambda x: x[1], reverse=True)
-        rec_etf, pred_ret = sorted_etfs[0]
-    else:
-        rec_etf, pred_ret = "—", 0
-        sorted_etfs = []
+    # SINGLE ETF: Pick highest return from best mode (already in signal)
+    rec_etf = signal.get("recommended_etf", "—")
+    pred_ret = signal.get("predicted_return", 0)
     
-    sdate = sig.get("signal_date", "—")
-    hold_until = sig.get("hold_until", "—")
-    data_date = sig.get("data_date", "—")
+    sdate = signal.get("signal_date", "—")
+    hold_until = signal.get("hold_until", "—")
+    data_date = signal.get("data_date", "—")
     
     # ETF legend
     cols_b = st.columns(6)
@@ -256,7 +260,7 @@ def main():
     
     st.divider()
     
-    # Signal card
+    # Signal card + predictions from both modes
     col_s, col_p = st.columns([1, 2], gap="large")
     
     with col_s:
@@ -277,12 +281,13 @@ def main():
         """, unsafe_allow_html=True)
     
     with col_p:
-        st.markdown("### Predicted Returns by ETF")
+        st.markdown("### Predicted Returns by ETF (Best Model)")
         st.caption("Highlighted = selected ETF (highest predicted return)")
         if pred_returns:
             st.plotly_chart(chart_returns_bar(pred_returns, rec_etf), use_container_width=True)
             
             # Show ranking
+            sorted_etfs = sorted(pred_returns.items(), key=lambda x: x[1], reverse=True)
             st.caption("**Ranking (highest to lowest predicted return):**")
             for i, (etf, ret) in enumerate(sorted_etfs, 1):
                 marker = "★" if etf == rec_etf else f"{i}."
@@ -290,6 +295,39 @@ def main():
                 st.markdown(f"{marker} **{etf}**: <span style='color:{color}'>{ret*100:+.2f}%</span>", unsafe_allow_html=True)
         else:
             st.info("No prediction data available")
+    
+    # NEW SECTION: Show predictions from both models
+    if mode_predictions:
+        st.divider()
+        st.markdown("### What Each Model Predicts for the Next 48 Days")
+        cols = st.columns(2)
+        
+        for idx, mode in enumerate(["expanding", "shrinking"]):
+            pred = mode_predictions.get(mode)
+            if pred and "recommended_etf" in pred:
+                with cols[idx]:
+                    mode_label = MODE_LABELS.get(mode, mode)
+                    mode_color = MODE_COLORS.get(mode, "#000")
+                    etf = pred["recommended_etf"]
+                    ret = pred["predicted_return"]
+                    ret_class = "sig-ret" if ret >= 0 else "sig-ret-neg"
+                    
+                    st.markdown(f"""
+                    <div class="pred-card pred-{mode}" style="border-left-color: {mode_color};">
+                        <div style="font-size:0.9rem; font-weight:600; color:{mode_color};">{mode_label}</div>
+                        <div class="pred-etf">{etf}</div>
+                        <div class="{ret_class}" style="font-size:1.6rem;">{ret*100:+.2f}%</div>
+                        <div style="font-size:0.8rem; color:#6b7280;">Predicted 48-day return</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Optionally show full table of predictions for that mode
+                    with st.expander(f"Show all {mode} predictions"):
+                        all_preds = pred.get("predicted_returns", {})
+                        for ticker, val in all_preds.items():
+                            col1, col2 = st.columns([1, 1])
+                            col1.markdown(f"**{ticker}**")
+                            col2.markdown(f"<span style='color:{'#15803d' if val>=0 else '#b91c1c'}'>{val*100:+.2f}%</span>", unsafe_allow_html=True)
     
     # BOTH MODES: Walk-Forward Performance Comparison
     st.divider()
@@ -306,7 +344,6 @@ def main():
         else:  # max_dd, ann_vol (lower is better)
             return abs(val_exp) < abs(val_shrink) if val_exp != val_shrink else best_mode == "expanding"
     
-    # Create comparison table
     if expanding_metrics and shrinking_metrics:
         col_e, col_s = st.columns(2)
         
@@ -319,7 +356,6 @@ def main():
             e_vol = expanding_metrics.get("ann_vol", 0)
             
             c1, c2 = st.columns(2)
-            # KEY FIX: as_percent=True for returns, as_percent=False for Sharpe
             c1.markdown(mcard("Ann. Return", e_ret, is_better=is_better_expanding("ann_return", e_ret, shrinking_metrics.get("ann_return", 0)), as_percent=True), unsafe_allow_html=True)
             c2.markdown(mcard("Sharpe Ratio", e_sharpe, is_better=is_better_expanding("sharpe", e_sharpe, shrinking_metrics.get("sharpe", 0)), as_percent=False), unsafe_allow_html=True)
             
@@ -336,7 +372,6 @@ def main():
             s_vol = shrinking_metrics.get("ann_vol", 0)
             
             c1, c2 = st.columns(2)
-            # KEY FIX: as_percent=True for returns, as_percent=False for Sharpe
             c1.markdown(mcard("Ann. Return", s_ret, is_better=not is_better_expanding("ann_return", e_ret, s_ret), as_percent=True), unsafe_allow_html=True)
             c2.markdown(mcard("Sharpe Ratio", s_sharpe, is_better=not is_better_expanding("sharpe", e_sharpe, s_sharpe), as_percent=False), unsafe_allow_html=True)
             
@@ -344,7 +379,6 @@ def main():
             c3.markdown(mcard("Max Drawdown", s_dd, good=False, is_better=not is_better_expanding("max_dd", e_dd, s_dd), as_percent=True), unsafe_allow_html=True)
             c4.markdown(mcard("Ann. Volatility", s_vol, good=False, is_better=not is_better_expanding("ann_vol", e_vol, s_vol), as_percent=True), unsafe_allow_html=True)
         
-        # Summary comparison
         st.markdown("---")
         if best_mode == "expanding":
             st.success(f"**Selected Model:** Expanding Window (better historical performance)")
@@ -360,8 +394,8 @@ def main():
     else:
         st.warning("No walk-forward performance data available")
     
-    if latest and "generated_at" in latest:
-        st.caption(f"Last updated: {latest['generated_at']}")
+    if "generated_at" in data:
+        st.caption(f"Last updated: {data['generated_at']}")
     
     # Disclaimer
     st.markdown("""
