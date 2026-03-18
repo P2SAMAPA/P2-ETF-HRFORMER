@@ -25,7 +25,7 @@ EPOCHS = 30
 PATIENCE = 10
 LR = 1e-3
 BATCH_SIZE = 32
-FIXED_YEARS = 2
+FIXED_YEARS = 2          # (unused in shrinking mode, kept for reference)
 FOLD_YEARS = 1
 MIN_TRAIN_YEARS = 3
 
@@ -210,7 +210,7 @@ def backtest_fold(model, feature_df, test_idx, mean, std, trading_cost=0.001):
 def run_walk_forward(feature_df, label_df, mode, model_path):
     trading_days_per_year = 252
     fold_days = FOLD_YEARS * trading_days_per_year
-    fixed_days = FIXED_YEARS * trading_days_per_year
+    fixed_days = FIXED_YEARS * trading_days_per_year   # (unused in shrinking mode)
     min_days = MIN_TRAIN_YEARS * trading_days_per_year
 
     n = len(feature_df) - SEQ_LEN - PRED_HORIZON
@@ -228,8 +228,12 @@ def run_walk_forward(feature_df, label_df, mode, model_path):
         test_end = min(cutoff + fold_days, n)
         if mode == "expanding":
             train_start = 0
-        else:
-            train_start = max(0, cutoff - fixed_days)
+        else:  # mode == "shrinking"
+            # Shrink by one fold year each fold: start moves forward
+            shrink_step_days = FOLD_YEARS * trading_days_per_year
+            train_start = fi * shrink_step_days
+            # (Optionally cap train_start to cutoff - min_days to ensure minimum window length,
+            # but the existing skip condition below will handle too-short windows.)
 
         train_len = cutoff - train_start
         val_start = train_start + int(train_len * 0.8)
@@ -314,7 +318,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN"))
     parser.add_argument("--mode", type=str, required=True,
-                        choices=["expanding", "fixed"])
+                        choices=["expanding", "shrinking"])
     args = parser.parse_args()
 
     print(f"Device: {DEVICE} | Mode: {args.mode}")
