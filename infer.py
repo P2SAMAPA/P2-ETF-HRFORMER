@@ -72,7 +72,7 @@ def load_combined_results():
     combined = {}
     mode_metrics = {}
     
-    for mode in ["expanding", "fixed"]:
+    for mode in ["expanding", "shrinking"]:
         try:
             with open(f"walk_forward_results_{mode}.json", "r") as f:
                 data = json.load(f)
@@ -144,7 +144,7 @@ def load_combined_results():
     best_score = -float('inf')
     
     print("\n  Comparing modes:")
-    for mode in ["expanding", "fixed"]:
+    for mode in ["expanding", "shrinking"]:
         if mode in mode_metrics:
             m = mode_metrics[mode]
             ann_ret = m.get("annualised_return", -999)
@@ -170,7 +170,7 @@ def load_combined_results():
         # Sanity check: if max_drawdown is -1.0 or total_return is absurd, use other mode
         if perf.get("max_drawdown") == -1.0 or perf.get("total_return", 0) > 1e10:
             print(f"\n  WARNING: {best_mode} has corrupt metrics, switching to other mode")
-            other_mode = "fixed" if best_mode == "expanding" else "expanding"
+            other_mode = "shrinking" if best_mode == "expanding" else "expanding"
             if other_mode in mode_metrics:
                 best_mode = other_mode
                 perf = mode_metrics[best_mode]
