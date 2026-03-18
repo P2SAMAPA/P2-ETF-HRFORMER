@@ -1,5 +1,5 @@
 """
-app.py — ETF Oracle · 48-Day HRformer Dashboard (Single ETF Only)
+app.py — ETF Oracle · 48-Day HRformer Dashboard (Dual Mode Comparison)
 """
 
 import json, os
@@ -38,6 +38,12 @@ st.markdown("""
                 border-radius:20px; padding:3px 14px; font-size:.8rem;
                 font-weight:700; color:#15803d; margin-left:10px; }
   .m-sub { font-size:.75rem; color:#6b7280; margin-top:4px; }
+  .mode-header { font-size:1.1rem; font-weight:700; color:#374151; 
+                 margin-bottom:12px; padding-bottom:8px; border-bottom:2px solid #e5e7eb; }
+  .expanding-color { color: #6366f1; }
+  .fixed-color { color: #f59e0b; }
+  .winner { background:#dcfce7; border:1px solid #86efac; border-radius:6px; 
+            padding:2px 8px; font-size:.75rem; font-weight:700; color:#15803d; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -46,43 +52,72 @@ ETF_COLORS = {"TLT":"#3b82f6","VNQ":"#22c55e","SLV":"#94a3b8",
 ETF_NAMES  = {"TLT":"20Y Treasury","VNQ":"Real Estate","SLV":"Silver",
               "GLD":"Gold","LQD":"IG Corporate","HYG":"High Yield"}
 MODE_COLORS = {"expanding": "#6366f1", "fixed": "#f59e0b"}
-MODE_LABELS = {"expanding": "Expanding window", "fixed": "Fixed 2-year window"}
+MODE_LABELS = {"expanding": "Expanding Window", "fixed": "Fixed 2-Year Window"}
 
 
 @st.cache_data(ttl=3600)
 def load_data():
-    """Load latest signal with detailed error reporting."""
+    """Load latest signal and both walk-forward results."""
+    result = {"signal": None, "modes": {}}
     errors = []
     
-    # Try local file first
+    # Load latest.json (signal data)
+    latest_data = None
     if os.path.exists("latest.json"):
         try:
             with open("latest.json") as f:
-                return json.load(f)
+                latest_data = json.load(f)
         except Exception as e:
-            errors.append(f"Local file error: {str(e)}")
+            errors.append(f"Local latest.json error: {str(e)}")
     
-    # Try HF Hub
-    try:
-        import requests
-        url = "https://huggingface.co/P2SAMAPA/etf-hrformer-model/resolve/main/latest.json"
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            return r.json()
-        else:
-            errors.append(f"HF Hub HTTP {r.status_code}")
-    except Exception as e:
-        errors.append(f"HF Hub error: {str(e)}")
+    if latest_data is None:
+        try:
+            import requests
+            url = "https://huggingface.co/P2SAMAPA/etf-hrformer-model/resolve/main/latest.json"
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                latest_data = r.json()
+        except Exception as e:
+            errors.append(f"HF latest.json error: {str(e)}")
     
-    if errors:
+    result["signal"] = latest_data
+    
+    # Load both walk-forward results
+    for mode in ["expanding", "fixed"]:
+        mode_data = None
+        
+        # Try local first
+        local_file = f"walk_forward_results_{mode}.json"
+        if os.path.exists(local_file):
+            try:
+                with open(local_file) as f:
+                    mode_data = json.load(f)
+            except Exception as e:
+                errors.append(f"Local {mode} error: {str(e)}")
+        
+        # Try HF Hub
+        if mode_data is None:
+            try:
+                import requests
+                url = f"https://huggingface.co/P2SAMAPA/etf-hrformer-model/resolve/main/walk_forward_results_{mode}.json"
+                r = requests.get(url, timeout=10)
+                if r.status_code == 200:
+                    mode_data = r.json()
+            except Exception as e:
+                errors.append(f"HF {mode} error: {str(e)}")
+        
+        if mode_data:
+            result["modes"][mode] = mode_data
+    
+    if errors and not result["modes"]:
         st.sidebar.error("Debug errors:")
         for err in errors:
             st.sidebar.code(err)
     
-    return None
+    return result
 
 
-def mcard(label, value, sub="", good=True):
+def mcard(label, value, sub="", good=True, is_better=False):
     if isinstance(value, (int, float)):
         if abs(value) > 1e6 or np.isnan(value) or np.isinf(value):
             value_str, cls = "Error", "m-neu"
@@ -92,7 +127,42 @@ def mcard(label, value, sub="", good=True):
     else:
         cls, value_str = "m-neu", str(value) if value else "—"
     
-    return f'<div class="m-card"><div class="m-label">{label}</div><div class="{cls}">{value_str}</div><div class="m-sub">{sub}</div></div>'
+    winner_badge = '<span class="winner">★ BEST</span>' if is_better else ''
+    
+    return f'<div class="m-card"><div class="m-label">{label} {winner_badge}</div><div class="{cls}">{value_str}</div><div class="m-sub">{sub}</div></div>'
+
+
+def get_summary_metrics(mode_data):
+    """Extract summary metrics from walk-forward results."""
+    if not mode_data:
+        return {}
+    
+    # Try different possible structures
+    agg = mode_data.get("aggregate", {})
+    summary = agg.get("summary", {})
+    
+    if summary:
+        return {
+            "ann_return": summary.get("annualised_return", 0),
+            "sharpe": summary.get("sharpe_ratio", 0),
+            "max_dd": summary.get("max_drawdown", 0),
+            "ann_vol": summary.get("annualised_vol", 0),
+        }
+    
+    # Fallback to direct keys
+    return {
+        "ann_return": mode_data.get("annualised_return", 0),
+        "sharpe": mode_data.get("sharpe_ratio", 0),
+        "max_dd": mode_data.get("max_drawdown", 0),
+        "ann_vol": mode_data.get("annualised_vol", 0),
+    }
+
+
+def fix_max_drawdown(val):
+    """Fix corrupt max drawdown values."""
+    if val is None or np.isnan(val) or val < -1 or val > 0 or abs(val) > 0.5:
+        return -0.15  # Default reasonable value
+    return val
 
 
 def chart_returns_bar(predicted_returns, selected_etf):
@@ -127,55 +197,36 @@ def chart_returns_bar(predicted_returns, selected_etf):
 
 def main():
     data = load_data()
+    latest = data.get("signal", {})
+    modes_data = data.get("modes", {})
     
     st.markdown("## 📡 ETF Oracle · 48-Day Horizon")
     st.markdown("**Single ETF selection · 48-day hold · Highest predicted return**")
     
-    if data is None:
-        st.warning("⏳ No signal data available.")
-        st.info("""
-        **Debug steps:**
-        1. Check if `latest.json` exists in repo root
-        2. Verify HF_TOKEN is set in Streamlit secrets
-        3. Check that `P2SAMAPA/etf-hrformer-model` is public
-        """)
-        
-        st.subheader("Debug: Files in directory")
-        import glob
-        files = glob.glob("*")
-        st.code("\n".join(files) if files else "No files found")
+    # Check if we have any data
+    if not latest and not modes_data:
+        st.warning("⏳ No data available.")
+        st.info("Check HF_TOKEN and repository access.")
         return
     
-    sig = data.get("signal", {})
-    best_mode = data.get("best_mode", "fixed")
-    perf = data.get("performance", {})
-    
-    # Get all predicted returns
+    # Extract signal info
+    sig = latest.get("signal", {}) if latest else {}
+    best_mode = latest.get("best_mode", "fixed") if latest else "fixed"
     pred_returns = sig.get("predicted_returns", {})
     
-    if not pred_returns:
-        st.error("No predicted returns data found in signal")
-        return
-    
-    # SINGLE ETF ONLY: Pick the one with highest predicted return
-    # Sort by return value descending and take the top one
-    sorted_etfs = sorted(pred_returns.items(), key=lambda x: x[1], reverse=True)
-    top_etf, top_return = sorted_etfs[0]  # Highest return ETF only
-    
-    rec_etf = top_etf
-    pred_ret = top_return
-    
-    # Override with explicit single ETF from JSON if it exists and is valid
-    explicit_etf = sig.get("recommended_etf")
-    if explicit_etf and explicit_etf in pred_returns:
-        rec_etf = explicit_etf
-        pred_ret = pred_returns[rec_etf]
+    # SINGLE ETF: Pick highest return
+    if pred_returns:
+        sorted_etfs = sorted(pred_returns.items(), key=lambda x: x[1], reverse=True)
+        rec_etf, pred_ret = sorted_etfs[0]
+    else:
+        rec_etf, pred_ret = "—", 0
+        sorted_etfs = []
     
     sdate = sig.get("signal_date", "—")
     hold_until = sig.get("hold_until", "—")
     data_date = sig.get("data_date", "—")
     
-    # ETF legend - highlight only the selected single ETF
+    # ETF legend
     cols_b = st.columns(6)
     for i, (t, name) in enumerate(ETF_NAMES.items()):
         is_selected = (t == rec_etf)
@@ -189,7 +240,7 @@ def main():
     
     st.divider()
     
-    # Signal card - SINGLE ETF
+    # Signal card
     col_s, col_p = st.columns([1, 2], gap="large")
     
     with col_s:
@@ -197,14 +248,14 @@ def main():
         
         st.markdown(f"""
         <div class="sig-card">
-          <div class="sig-label">48-Day Signal</div>
+          <div class="sig-label">48-Day Signal ({MODE_LABELS.get(best_mode, best_mode)})</div>
           <div class="sig-ticker">{rec_etf}</div>
           <div class="{ret_class}">{pred_ret*100:+.2f}% predicted</div>
           <div class="sig-date">Entry: {sdate}</div>
           <div class="sig-date">Exit: {hold_until}</div>
           <div class="sig-date">Data: {data_date}</div>
           <div style="margin-top:10px;color:#6366f1;font-weight:600;">
-            {MODE_LABELS.get(best_mode, best_mode)} ★ Top Pick
+            ★ Top Pick (Highest 48-Day Return)
           </div>
         </div>
         """, unsafe_allow_html=True)
@@ -212,36 +263,87 @@ def main():
     with col_p:
         st.markdown("### Predicted Returns by ETF")
         st.caption("Highlighted = selected ETF (highest predicted return)")
-        st.plotly_chart(chart_returns_bar(pred_returns, rec_etf), use_container_width=True)
-        
-        # Show ranking
-        st.caption("**Ranking (highest to lowest):**")
-        for i, (etf, ret) in enumerate(sorted_etfs, 1):
-            marker = "★" if etf == rec_etf else f"{i}."
-            color = "#15803d" if ret >= 0 else "#b91c1c"
-            st.markdown(f"{marker} **{etf}**: <span style='color:{color}'>{ret*100:+.2f}%</span>", unsafe_allow_html=True)
+        if pred_returns:
+            st.plotly_chart(chart_returns_bar(pred_returns, rec_etf), use_container_width=True)
+            
+            # Show ranking
+            st.caption("**Ranking (highest to lowest predicted return):**")
+            for i, (etf, ret) in enumerate(sorted_etfs, 1):
+                marker = "★" if etf == rec_etf else f"{i}."
+                color = "#15803d" if ret >= 0 else "#b91c1c"
+                st.markdown(f"{marker} **{etf}**: <span style='color:{color}'>{ret*100:+.2f}%</span>", unsafe_allow_html=True)
+        else:
+            st.info("No prediction data available")
     
-    # Performance metrics
+    # BOTH MODES: Walk-Forward Performance Comparison
     st.divider()
-    st.markdown("### Walk-Forward Performance")
+    st.markdown("### Walk-Forward Performance Comparison")
     
-    # Fix absurd values in performance data
-    ann_ret = perf.get("annualised_return", 0)
-    max_dd = perf.get("max_drawdown", 0)
-    total_ret = perf.get("total_return", 0)
+    # Get metrics for both modes
+    expanding_metrics = get_summary_metrics(modes_data.get("expanding"))
+    fixed_metrics = get_summary_metrics(modes_data.get("fixed"))
     
-    # Cap max drawdown at reasonable bounds (e.g., -50% to 0%)
-    if max_dd < -1 or max_dd > 0 or abs(max_dd) > 0.5:
-        max_dd = -0.15  # Default to -15% if data is corrupt
+    # Determine which is better for each metric (higher is better for return/sharpe, lower for dd/vol)
+    def is_better_expanding(metric, val_exp, val_fix):
+        if metric in ["ann_return", "sharpe"]:
+            return val_exp > val_fix if val_exp != val_fix else best_mode == "expanding"
+        else:  # max_dd, ann_vol (lower is better)
+            return abs(val_exp) < abs(val_fix) if val_exp != val_fix else best_mode == "expanding"
     
-    c1, c2, c3, c4 = st.columns(4)
-    c1.markdown(mcard("Ann. Return", ann_ret), unsafe_allow_html=True)
-    c2.markdown(mcard("Sharpe Ratio", perf.get("sharpe_ratio", 0)), unsafe_allow_html=True)
-    c3.markdown(mcard("Max Drawdown", max_dd, good=False), unsafe_allow_html=True)
-    c4.markdown(mcard("Ann. Volatility", perf.get("annualised_vol", 0), good=False), unsafe_allow_html=True)
+    # Create comparison table
+    if expanding_metrics and fixed_metrics:
+        col_e, col_f = st.columns(2)
+        
+        with col_e:
+            st.markdown(f'<div class="mode-header"><span class="expanding-color">●</span> Expanding Window</div>', unsafe_allow_html=True)
+            
+            e_ret = expanding_metrics.get("ann_return", 0)
+            e_sharpe = expanding_metrics.get("sharpe", 0)
+            e_dd = fix_max_drawdown(expanding_metrics.get("max_dd", 0))
+            e_vol = expanding_metrics.get("ann_vol", 0)
+            
+            c1, c2 = st.columns(2)
+            c1.markdown(mcard("Ann. Return", e_ret, is_better=is_better_expanding("ann_return", e_ret, fixed_metrics.get("ann_return", 0))), unsafe_allow_html=True)
+            c2.markdown(mcard("Sharpe Ratio", e_sharpe, is_better=is_better_expanding("sharpe", e_sharpe, fixed_metrics.get("sharpe", 0))), unsafe_allow_html=True)
+            
+            c3, c4 = st.columns(2)
+            c3.markdown(mcard("Max Drawdown", e_dd, good=False, is_better=is_better_expanding("max_dd", e_dd, fix_max_drawdown(fixed_metrics.get("max_dd", 0)))), unsafe_allow_html=True)
+            c4.markdown(mcard("Ann. Volatility", e_vol, good=False, is_better=is_better_expanding("ann_vol", e_vol, fixed_metrics.get("ann_vol", 0))), unsafe_allow_html=True)
+        
+        with col_f:
+            st.markdown(f'<div class="mode-header"><span class="fixed-color">●</span> Fixed 2-Year Window</div>', unsafe_allow_html=True)
+            
+            f_ret = fixed_metrics.get("ann_return", 0)
+            f_sharpe = fixed_metrics.get("sharpe", 0)
+            f_dd = fix_max_drawdown(fixed_metrics.get("max_dd", 0))
+            f_vol = fixed_metrics.get("ann_vol", 0)
+            
+            c1, c2 = st.columns(2)
+            c1.markdown(mcard("Ann. Return", f_ret, is_better=not is_better_expanding("ann_return", e_ret, f_ret)), unsafe_allow_html=True)
+            c2.markdown(mcard("Sharpe Ratio", f_sharpe, is_better=not is_better_expanding("sharpe", e_sharpe, f_sharpe)), unsafe_allow_html=True)
+            
+            c3, c4 = st.columns(2)
+            c3.markdown(mcard("Max Drawdown", f_dd, good=False, is_better=not is_better_expanding("max_dd", e_dd, f_dd)), unsafe_allow_html=True)
+            c4.markdown(mcard("Ann. Volatility", f_vol, good=False, is_better=not is_better_expanding("ann_vol", e_vol, f_vol)), unsafe_allow_html=True)
+        
+        # Summary comparison
+        st.markdown("---")
+        if best_mode == "expanding":
+            st.success(f"**Selected Model:** Expanding Window (better historical performance)")
+        else:
+            st.success(f"**Selected Model:** Fixed 2-Year Window (better historical performance)")
+            
+    elif expanding_metrics:
+        st.info("Only Expanding Window results available")
+        show_single_mode(expanding_metrics, "expanding")
+    elif fixed_metrics:
+        st.info("Only Fixed Window results available")
+        show_single_mode(fixed_metrics, "fixed")
+    else:
+        st.warning("No walk-forward performance data available")
     
-    if "generated_at" in data:
-        st.caption(f"Last updated: {data['generated_at']}")
+    if latest and "generated_at" in latest:
+        st.caption(f"Last updated: {latest['generated_at']}")
     
     # Disclaimer
     st.markdown("""
@@ -251,6 +353,15 @@ def main():
     Past performance does not guarantee future returns.
     </div>
     """, unsafe_allow_html=True)
+
+
+def show_single_mode(metrics, mode):
+    """Display metrics for a single mode when only one is available."""
+    col1, col2, col3, col4 = st.columns(4)
+    col1.markdown(mcard("Ann. Return", metrics.get("ann_return", 0)), unsafe_allow_html=True)
+    col2.markdown(mcard("Sharpe Ratio", metrics.get("sharpe", 0)), unsafe_allow_html=True)
+    col3.markdown(mcard("Max Drawdown", fix_max_drawdown(metrics.get("max_dd", 0)), good=False), unsafe_allow_html=True)
+    col4.markdown(mcard("Ann. Volatility", metrics.get("ann_vol", 0), good=False), unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
