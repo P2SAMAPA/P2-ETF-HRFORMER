@@ -2,11 +2,13 @@
 infer.py
 Generate 48-day ahead signal using trained model.
 Selects ETF with highest predicted return across all models.
+Maintains prediction history with actual returns.
 """
 
 import os, sys, json, argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
+import pandas as pd
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -18,6 +20,7 @@ from hrformer import build_model
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 OUTPUT_PATH = "latest.json"
+HISTORY_PATH = "prediction_history.json"
 
 
 def generate_signal(model, feature_df, mean, std, mode_name=""):
@@ -191,6 +194,84 @@ def load_combined_results():
     return combined, best_historical_mode, mode_metrics
 
 
+def load_history(hf_token=None):
+    """Load prediction history from local file or HF Hub."""
+    history = {"predictions": []}
+    if os.path.exists(HISTORY_PATH):
+        try:
+            with open(HISTORY_PATH, "r") as f:
+                history = json.load(f)
+            print(f"Loaded history with {len(history.get('predictions', []))} entries.")
+        except Exception as e:
+            print(f"Error loading local history: {e}")
+    else:
+        # Try to download from HF
+        try:
+            from huggingface_hub import hf_hub_download
+            local_path = hf_hub_download(
+                repo_id="P2SAMAPA/etf-hrformer-model",
+                filename=HISTORY_PATH,
+                repo_type="model",
+                token=hf_token
+            )
+            with open(local_path, "r") as f:
+                history = json.load(f)
+            print(f"Downloaded history with {len(history.get('predictions', []))} entries.")
+        except Exception as e:
+            print(f"No history file found on HF, starting fresh.")
+    return history
+
+
+def update_history(history, new_signal, feature_df):
+    """
+    Update history:
+    - Compute actual returns for any matured predictions.
+    - Append new prediction.
+    """
+    predictions = history.get("predictions", [])
+    today = datetime.now().date()
+    
+    # Update matured predictions
+    for p in predictions:
+        if p.get("actual_return") is not None:
+            continue  # already computed
+        exit_date_str = p.get("hold_until")
+        if not exit_date_str:
+            continue
+        exit_date = datetime.strptime(exit_date_str, "%Y-%m-%d").date()
+        if exit_date <= today:
+            # Compute actual return
+            entry_date_str = p.get("signal_date")
+            ticker = p.get("recommended_etf")
+            try:
+                entry_close = feature_df[ticker]["Close"].loc[entry_date_str]
+                exit_close = feature_df[ticker]["Close"].loc[exit_date_str]
+                actual_return = (exit_close - entry_close) / entry_close
+                p["actual_return"] = round(float(actual_return), 4)
+                print(f"Updated {entry_date_str} {ticker}: actual return = {actual_return*100:+.2f}%")
+            except Exception as e:
+                print(f"Could not compute actual return for {entry_date_str}: {e}")
+                p["actual_return"] = None  # mark as failed (maybe missing data)
+    
+    # Append new prediction (actual_return = None)
+    new_entry = {
+        "signal_date": new_signal["signal_date"],
+        "hold_until": new_signal["hold_until"],
+        "data_date": new_signal["data_date"],
+        "recommended_etf": new_signal["recommended_etf"],
+        "predicted_return": new_signal["predicted_return"],
+        "actual_return": None,
+        "hero_mode": hero_mode,  # we'll set this later
+    }
+    predictions.append(new_entry)
+    
+    # Sort by signal_date descending (most recent first)
+    predictions.sort(key=lambda x: x["signal_date"], reverse=True)
+    history["predictions"] = predictions
+    history["last_updated"] = datetime.utcnow().isoformat()
+    return history
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN"))
@@ -245,14 +326,24 @@ def main():
 
     print(f"\nHero mode (highest predicted return): {hero_mode.upper()} with predicted return {max_return*100:+.2f}%")
 
+    # Load and update history
+    history = load_history(args.hf_token)
+    history = update_history(history, hero_signal, feature_df)
+
+    # Save history locally and push to HF
+    with open(HISTORY_PATH, "w") as f:
+        json.dump(history, f, indent=2)
+    print(f"History saved → {HISTORY_PATH}")
+
+    # Prepare output JSON
     output = {
         "generated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "best_historical_mode": historical_best_mode,
         "hero_mode": hero_mode,
-        "signal": hero_signal,                     # hero box uses this
-        "mode_predictions": mode_signals,           # full predictions for both modes
+        "signal": hero_signal,
+        "mode_predictions": mode_signals,
         "historical_performance": results.get("historical_performance", {}),
-        "mode_comparison": mode_metrics,            # both modes' historical metrics
+        "mode_comparison": mode_metrics,
     }
 
     with open(OUTPUT_PATH, "w") as f:
@@ -264,11 +355,19 @@ def main():
         try:
             from huggingface_hub import HfApi
             api = HfApi(token=args.hf_token)
+            repo_id = "P2SAMAPA/etf-hrformer-model"
+            
+            # Upload latest.json
             api.upload_file(path_or_fileobj=OUTPUT_PATH,
-                            path_in_repo="latest.json",
-                            repo_id="P2SAMAPA/etf-hrformer-model",
-                            repo_type="model")
-            print("Pushed to HF Hub.")
+                            path_in_repo=OUTPUT_PATH,
+                            repo_id=repo_id, repo_type="model")
+            print("Pushed latest.json to HF Hub.")
+            
+            # Upload history
+            api.upload_file(path_or_fileobj=HISTORY_PATH,
+                            path_in_repo=HISTORY_PATH,
+                            repo_id=repo_id, repo_type="model")
+            print("Pushed prediction_history.json to HF Hub.")
         except Exception as e:
             print(f"HF push failed: {e}")
 
