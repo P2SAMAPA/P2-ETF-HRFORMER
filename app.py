@@ -1,6 +1,6 @@
 """
 app.py — ETF Oracle · 48-Day HRformer Dashboard (Dual Mode Comparison)
-Expanding vs Shrinking Window — Shows predictions from both models.
+Expanding vs Shrinking Window — Hero shows ETF with highest predicted return.
 """
 
 import json, os
@@ -88,9 +88,10 @@ def load_data():
     
     if latest_data:
         result["signal"] = latest_data.get("signal")
-        result["best_mode"] = latest_data.get("best_mode")
+        result["hero_mode"] = latest_data.get("hero_mode")
+        result["best_historical_mode"] = latest_data.get("best_historical_mode")
         result["mode_predictions"] = latest_data.get("mode_predictions", {})
-        result["performance"] = latest_data.get("performance", {})
+        result["historical_performance"] = latest_data.get("historical_performance", {})
         result["mode_comparison"] = latest_data.get("mode_comparison", {})
     
     # Load walk-forward results for both modes (for performance metrics)
@@ -222,7 +223,8 @@ def chart_returns_bar(predicted_returns, selected_etf):
 def main():
     data = load_data()
     signal = data.get("signal", {})
-    best_mode = data.get("best_mode", "shrinking")
+    hero_mode = data.get("hero_mode", "shrinking")
+    best_historical_mode = data.get("best_historical_mode", "shrinking")
     mode_predictions = data.get("mode_predictions", {})
     modes_data = data.get("modes", {})
     
@@ -237,8 +239,6 @@ def main():
     
     # Extract signal info
     pred_returns = signal.get("predicted_returns", {})
-    
-    # SINGLE ETF: Pick highest return from best mode (already in signal)
     rec_etf = signal.get("recommended_etf", "—")
     pred_ret = signal.get("predicted_return", 0)
     
@@ -260,28 +260,29 @@ def main():
     
     st.divider()
     
-    # Signal card + predictions from both modes
+    # Signal card + predictions from best model
     col_s, col_p = st.columns([1, 2], gap="large")
     
     with col_s:
         ret_class = "sig-ret" if pred_ret >= 0 else "sig-ret-neg"
+        hero_mode_label = MODE_LABELS.get(hero_mode, hero_mode)
         
         st.markdown(f"""
         <div class="sig-card">
-          <div class="sig-label">48-Day Signal ({MODE_LABELS.get(best_mode, best_mode)})</div>
+          <div class="sig-label">48-Day Signal ({hero_mode_label})</div>
           <div class="sig-ticker">{rec_etf}</div>
           <div class="{ret_class}">{pred_ret*100:+.2f}% predicted</div>
           <div class="sig-date">Entry: {sdate}</div>
           <div class="sig-date">Exit: {hold_until}</div>
           <div class="sig-date">Data: {data_date}</div>
           <div style="margin-top:10px;color:#6366f1;font-weight:600;">
-            ★ Top Pick (Highest 48-Day Return)
+            ★ Top Pick (Highest 48-Day Return Across Both Models)
           </div>
         </div>
         """, unsafe_allow_html=True)
     
     with col_p:
-        st.markdown("### Predicted Returns by ETF (Best Model)")
+        st.markdown("### Predicted Returns by ETF (Hero Model)")
         st.caption("Highlighted = selected ETF (highest predicted return)")
         if pred_returns:
             st.plotly_chart(chart_returns_bar(pred_returns, rec_etf), use_container_width=True)
@@ -296,7 +297,7 @@ def main():
         else:
             st.info("No prediction data available")
     
-    # NEW SECTION: Show predictions from both models
+    # Show predictions from both models
     if mode_predictions:
         st.divider()
         st.markdown("### What Each Model Predicts for the Next 48 Days")
@@ -337,12 +338,21 @@ def main():
     expanding_metrics = get_summary_metrics(modes_data.get("expanding"))
     shrinking_metrics = get_summary_metrics(modes_data.get("shrinking"))
     
-    # Determine which is better for each metric (higher is better for return/sharpe, lower for dd/vol)
+    # Determine historical best for tie-breaking
+    historical_best_mode = best_historical_mode
+    
+    # Define tie-breaking function using historical best
     def is_better_expanding(metric, val_exp, val_shrink):
         if metric in ["ann_return", "sharpe"]:
-            return val_exp > val_shrink if val_exp != val_shrink else best_mode == "expanding"
+            if val_exp != val_shrink:
+                return val_exp > val_shrink
+            else:
+                return historical_best_mode == "expanding"
         else:  # max_dd, ann_vol (lower is better)
-            return abs(val_exp) < abs(val_shrink) if val_exp != val_shrink else best_mode == "expanding"
+            if val_exp != val_shrink:
+                return abs(val_exp) < abs(val_shrink)
+            else:
+                return historical_best_mode == "expanding"
     
     if expanding_metrics and shrinking_metrics:
         col_e, col_s = st.columns(2)
@@ -380,10 +390,10 @@ def main():
             c4.markdown(mcard("Ann. Volatility", s_vol, good=False, is_better=not is_better_expanding("ann_vol", e_vol, s_vol), as_percent=True), unsafe_allow_html=True)
         
         st.markdown("---")
-        if best_mode == "expanding":
-            st.success(f"**Selected Model:** Expanding Window (better historical performance)")
+        if historical_best_mode == "expanding":
+            st.success(f"**Historically Better Model:** Expanding Window (higher risk‑adjusted return)")
         else:
-            st.success(f"**Selected Model:** Shrinking Window (better historical performance)")
+            st.success(f"**Historically Better Model:** Shrinking Window (higher risk‑adjusted return)")
             
     elif expanding_metrics:
         st.info("Only Expanding Window results available")
