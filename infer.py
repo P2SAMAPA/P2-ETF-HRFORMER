@@ -213,7 +213,8 @@ def main():
     
     # Try local first, then HF
     try:
-        checkpoint = torch.load(model_path, map_location=DEVICE)
+        # FIX: Add weights_only=False for PyTorch 2.6+ compatibility
+        checkpoint = torch.load(model_path, map_location=DEVICE, weights_only=False)
     except FileNotFoundError:
         # Download from HF
         from huggingface_hub import hf_hub_download
@@ -223,7 +224,8 @@ def main():
             repo_type="model",
             token=args.hf_token
         )
-        checkpoint = torch.load(local_path, map_location=DEVICE)
+        # FIX: Add weights_only=False here too
+        checkpoint = torch.load(local_path, map_location=DEVICE, weights_only=False)
     
     model = build_model().to(DEVICE)
     model.load_state_dict(checkpoint['model'])
