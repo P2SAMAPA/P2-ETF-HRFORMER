@@ -3,7 +3,7 @@ infer.py
 Generate 48-day ahead signal using trained model.
 Selects ETF with highest predicted return across all models.
 Maintains prediction history with actual 1‑day returns (daily rebalancing).
-Includes migration for old history entries.
+Includes migration for old history entries and deduplication.
 """
 
 import os, sys, json, argparse
@@ -219,6 +219,7 @@ def update_history(history, new_signal, feature_df, hero_mode):
     """
     Update history:
     - Migrate old entries (from previous format) to new format.
+    - Deduplicate entries by (entry_date, recommended_etf).
     - Compute actual 1‑day returns for any past predictions whose next trading day exists.
     - Append new prediction.
     """
@@ -253,6 +254,21 @@ def update_history(history, new_signal, feature_df, hero_mode):
             print(f"Warning: dropping unrecognized history entry: {p}")
     
     predictions = migrated
+    
+    # ------------------------------------------------------------------
+    # Deduplicate predictions: keep only one per (entry_date, recommended_etf)
+    # This removes duplicate March 18 entries.
+    # ------------------------------------------------------------------
+    seen = {}
+    unique_predictions = []
+    for p in predictions:
+        key = (p["entry_date"], p["recommended_etf"])
+        if key not in seen:
+            seen[key] = True
+            unique_predictions.append(p)
+        else:
+            print(f"Removing duplicate entry for {key}")
+    predictions = unique_predictions
     
     # ------------------------------------------------------------------
     # Compute actual returns for matured predictions (1‑day)
