@@ -1,0 +1,56 @@
+name: Parallel Training — 48-Day HRformer (Equity ETFs)
+
+on:
+  schedule:
+    - cron: "0 23 * * 1-5"  # Mon-Fri at 23:00 UTC (1 hour after FI training)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300  # 2.5 hours per job
+
+    strategy:
+      matrix:
+        mode: [expanding, shrinking]
+      fail-fast: false  # If one fails, continue the other
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install "numpy<2"
+          pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu
+          pip install scikit-learn==1.4.2 huggingface_hub==0.23.0
+          pip install pandas==2.2.2 pyarrow==16.0.0 requests==2.31.0
+
+      - name: Train equity ${{ matrix.mode }} mode
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: python train_equity.py --hf_token "$HF_TOKEN" --mode ${{ matrix.mode }}
+
+      - name: Upload model artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-equity-${{ matrix.mode }}
+          path: model_equity_${{ matrix.mode }}.pt
+
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-equity-${{ matrix.mode }}
+          path: walk_forward_results_equity_${{ matrix.mode }}.json
