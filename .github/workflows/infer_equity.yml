@@ -1,0 +1,150 @@
+name: Generate Equity ETF Signal (Inference Only)
+
+on:
+  schedule:
+    - cron: '30 18 * * *'  # Daily at 18:30 UTC — 30 min after FI inference
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'infer_equity.py'
+      - 'data_utils_equity.py'
+      - 'hrformer.py'
+      - '.github/workflows/infer_equity.yml'
+
+jobs:
+  infer:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download equity model files from HF Hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python << 'EOF'
+          from huggingface_hub import hf_hub_download
+          import os
+
+          token   = os.environ.get("HF_TOKEN")
+          repo_id = "P2SAMAPA/etf-hrformer-model"
+
+          files_to_download = [
+              "model_equity_expanding.pt",
+              "model_equity_shrinking.pt",
+              "walk_forward_results_equity_expanding.json",
+              "walk_forward_results_equity_shrinking.json",
+          ]
+
+          for filename in files_to_download:
+              try:
+                  hf_hub_download(
+                      repo_id=repo_id,
+                      filename=filename,
+                      repo_type="model",
+                      token=token,
+                  )
+                  print(f"✓ Downloaded {filename}")
+              except Exception as e:
+                  print(f"✗ Failed to download {filename}: {e}")
+                  # infer_equity.py will handle missing files gracefully
+          EOF
+
+      - name: Run equity inference
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "Starting equity inference..."
+          python infer_equity.py --hf_token "$HF_TOKEN"
+          echo "Equity inference complete"
+
+      - name: Verify output
+        run: |
+          if [ -f "latest_equity.json" ]; then
+            echo "✓ latest_equity.json generated successfully"
+            cat latest_equity.json | head -20
+          else
+            echo "✗ latest_equity.json not found!"
+            exit 1
+          fi
+
+      - name: Upload to HF Hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python << 'EOF'
+          from huggingface_hub import HfApi
+          import os
+
+          token = os.environ.get("HF_TOKEN")
+          api   = HfApi(token=token)
+
+          for filename in ["latest_equity.json", "prediction_history_equity.json"]:
+              try:
+                  api.upload_file(
+                      path_or_fileobj=filename,
+                      path_in_repo=filename,
+                      repo_id="P2SAMAPA/etf-hrformer-model",
+                      repo_type="model",
+                  )
+                  print(f"✓ Pushed {filename} to HF Hub")
+              except Exception as e:
+                  print(f"✗ Upload failed for {filename}: {e}")
+                  raise
+          EOF
+
+      - name: Summary
+        run: |
+          echo "=== Equity Inference Summary ==="
+          python << 'EOF'
+          import json
+          try:
+              with open("latest_equity.json", "r") as f:
+                  data = json.load(f)
+
+              print(f"Generated at:      {data.get('generated_at', 'N/A')}")
+              print(f"Best hist. mode:   {data.get('best_historical_mode', 'N/A')}")
+              print(f"Hero mode:         {data.get('hero_mode', 'N/A')}")
+
+              signal = data.get("signal", {})
+              print(f"Recommended ETF:   {signal.get('recommended_etf', 'N/A')}")
+              print(f"Predicted return:  {signal.get('predicted_return', 0)*100:+.2f}%")
+              print(f"Entry date:        {signal.get('entry_date', 'N/A')}")
+              print(f"Target 48d date:   {signal.get('target_48_date', 'N/A')}")
+
+              perf = data.get("historical_performance", {})
+              print(f"\nHistorical performance (best mode):")
+              print(f"  Ann. Return: {perf.get('annualised_return', 0)*100:+.2f}%")
+              print(f"  Sharpe:      {perf.get('sharpe_ratio', 0):.2f}")
+              print(f"  Max DD:      {perf.get('max_drawdown', 0)*100:.2f}%")
+
+              comparison = data.get("mode_comparison", {})
+              if comparison:
+                  print(f"\nMode Comparison:")
+                  for mode, metrics in comparison.items():
+                      ret    = metrics.get("annualised_return", 0) * 100
+                      sharpe = metrics.get("sharpe_ratio", 0)
+                      print(f"  {mode}: {ret:+.2f}% return, {sharpe:.2f} Sharpe")
+          except Exception as e:
+              print(f"Error reading summary: {e}")
+          EOF
