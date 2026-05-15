@@ -2,7 +2,7 @@ name: Parallel Training — 48-Day HRformer
 
 on:
   schedule:
-    - cron: "0 22 * * 1-5"  # Mon-Fri at 22:00 UTC
+    - cron: "30 23 * * 1-5"  # Mon-Fri at 22:00 UTC
   workflow_dispatch:
 
 permissions:
