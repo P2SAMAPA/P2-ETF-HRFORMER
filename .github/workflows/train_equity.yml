@@ -2,7 +2,7 @@ name: Parallel Training — 48-Day HRformer (Equity ETFs)
 
 on:
   schedule:
-    - cron: "0 23 * * 1-5"  # Mon-Fri at 23:00 UTC (1 hour after FI training)
+    - cron: "30 23 * * 1-5"  # Mon-Fri at 23:00 UTC (1 hour after FI training)
   workflow_dispatch:
 
 permissions:
